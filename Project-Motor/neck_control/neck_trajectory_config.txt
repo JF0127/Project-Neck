@@ -1,0 +1,69 @@
+# Neck Trajectory Executor 配置（单位：度）
+# 语法：key = value；'#' 起始或行内 '#' 之后为注释；空行忽略。
+# 所有安全参数必须进配置，不硬编码。
+
+# ==================== 实机安全三把锁（默认全部关闭）====================
+# mode.hardware_enabled : 显式使能实机执行
+# calib.confirmed       : 标定完成并经人工确认
+# safety.confirmed      : 速度/加速度/jerk 等安全参数经实机测试确认
+# 三把锁任一为 false 时，实机执行（NeckTrajRun）一律拒绝；dry-run/mock 不受限。
+mode.hardware_enabled = true
+calib.confirmed = true
+safety.confirmed = true
+
+# ==================== 坐标系标定 ====================
+# 模型分量命名（对应上游 order 数组元素顺序）
+calib.model_axis_order = roll,pitch,yaw
+# 硬件欧拉分量命名：R = Rz(第3分量) @ Rx(第2分量) @ Ry(第1分量)
+calib.hardware_axis_order = roll,pitch,yaw
+# 各硬件分量符号（1 或 -1）。机构方向反了只改这里，不要在业务代码取负号。
+calib.axis_sign = 1,1,1
+# 模型坐标系 → 机器人坐标系固定旋转（行主序 3x3，单位阵=无旋转）
+calib.rotation_matrix = 1,0,0,0,1,0,0,0,1
+# 硬件坐标分量残余偏置（度，按 hardware_axis_order 顺序）
+calib.rpy_offset_deg = 0,0,0
+# true: 硬件零位电机角取 neck_config.txt 的 m10/m20/m30（推荐，与标定记录一致）
+calib.use_neck_config_neutral = true
+
+# ==================== 控制循环 ====================
+loop.rate_hz = 100                # 硬件控制频率（>= 30 Hz）
+loop.watchdog_timeout_ms = 1000   # 控制循环心跳超时（进程级 watchdog 触发制动）
+input.fps_min = 5                 # 上游 fps 允许范围
+input.fps_max = 120
+input.max_trajectory_frames = 200000
+input.max_timestamp_skew_s = 5    # 时间戳新鲜度（实机模式强制；纪元需与上游一致）
+input.stop_wait_ms = 1000         # 安全打断等待上限
+
+# ==================== 安全 ====================
+safety.enabled = true
+# 头部姿态限位（度）：pitch_min,pitch_max,roll_min,roll_max,yaw_min,yaw_max
+safety.rpy_limits_deg = -40,25,-35,35,-117,58
+# 电机输出轴限位（度）：m1_min,m1_max,m2_min,m2_max,m3_min,m3_max
+safety.joint_limits_deg = -85,64,-34,113,60,235
+# ---- 待实机标定项（当前为保守占位，不得直接用于实机）----
+# 电机输出轴速度/加速度/jerk 上限（度制）。未实机确认前保持保守值。
+safety.max_velocity_deg_s = 25,25,30
+safety.max_acceleration_deg_s2 = 60,60,90
+safety.max_jerk_deg_s3 = 300,300,450
+# ---- 容差与超时 ----
+safety.max_start_pose_error_deg = 5
+safety.max_tracking_error_deg = 3
+safety.tracking_error_timeout_ms = 300
+safety.command_timeout_ms = 200
+safety.feedback_timeout_ms = 200
+# 故障/超时默认不自动回中（回中可能造成二次危险）
+safety.return_to_neutral_on_timeout = false
+safety.stop_on_timeout = true
+safety.emergency_stop_enabled = true
+# 电机 spd 参数安全余量（位置伺服速度上限 = 计划速度 * spd_margin）
+safety.spd_margin = 1.25
+
+# ==================== 标定模式限速（比安全限速更保守）====================
+calib.max_velocity_deg_s = 10,10,15
+calib.max_acceleration_deg_s2 = 30,30,45
+calib.max_jerk_deg_s3 = 150,150,225
+# 标定单步最大幅度（度），防止误输入造成大动作
+calib.max_step_deg = 5.0
+
+# ==================== mock 执行器动力学 ====================
+mock.max_velocity_deg_s = 30,30,40

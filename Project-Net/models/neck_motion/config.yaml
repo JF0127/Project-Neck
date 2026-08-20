@@ -1,0 +1,103 @@
+# 话语级机器人颈部运动生成（第一版基线）默认配置
+# 所有路径相对本项目根目录（运行 train.py 的工作目录）。
+data:
+  data_root: data/source/response-net/processed_dataset
+  # 过滤条件：真实语音重叠 true_overlap > 该阈值（秒）的 fragment 剔除。
+  # true_overlap = 当前 fragment 实际词区间 ∩ 对方角色实际词区间 的交集总时长
+  # （不含窗口 0.3s/0.5s padding；由 models/neck_motion/overlap_filter.py 计算）。
+  # 设置为 null / 0 表示不过滤。所有 split 使用同一判据，按 fragment 过滤。
+  filter_overlap_sec: 0.1
+  # true_overlap 映射文件（uid -> 秒）；缺失时 train.py 自动生成，不写原始数据目录。
+  true_overlap_path: outputs/neck_motion/overlap_analysis/true_overlap.json
+  target_sr: 16000
+
+audio:
+  n_mels: 80
+  n_fft: 400          # 25 ms @ 16 kHz
+  hop_length: 160     # 10 ms -> 100 mel 帧/秒，再插值到 30 Hz RPY 帧
+  win_length: 400
+  f_min: 0.0
+  f_max: 8000.0
+  log_eps: 1.0e-5
+  normalize: true     # 对每个 fragment 做 log-Mel 的逐样本标准化
+
+text:
+  tokenizer: nfkc_lower_word   # Unicode NFKC 规范化 + 小写 + 按词切分
+  min_freq: 1                  # 词表只从 train split 构建
+  max_vocab: 20000
+  word_embed_dim: 128
+  context:
+    encoder: gru               # gru | mean_pool（只使用上一片段文本，不使用音频）
+    hidden_dim: 128
+    bidirectional: true
+    num_layers: 1
+
+model:
+  type: regression         # regression（确定性基线）| cvae（片段级条件 CVAE）| candidates（多候选）
+  hidden_dim: 256
+  use_audio: true            # 消融：false 时关闭音频分支
+  use_text: true             # 消融：false 时关闭当前文本词特征与上下文文本
+  audio_encoder:
+    out_dim: 128               # 两层 Conv1d + GELU 输出通道
+    kernel_size: 5
+  role_embed_dim: 16
+  transformer:
+    layers: 4
+    heads: 8
+    ffn_dim: 1024
+    dropout: 0.1
+    pos_encoding: sinusoidal   # sinusoidal | learned
+    max_len: 2048
+  head:
+    hidden_dim: 128            # SpeakerHead / ListenerHead: hidden -> 128 -> 3
+    dropout: 0.1
+
+# CVAE（model.type=cvae 时生效）
+cvae:
+  z_dim: 16                  # 片段级潜变量维度（整段共享，保证连贯）
+  target_encoder_hidden: 128 # 后验 q 的 target 轨迹编码器隐藏维
+  kl_weight: 0.001           # KL 权重（warm-up 完成后；KL 单位为 nats，重构为 rad）
+  free_bits: 0.5             # 每维 KL 下限（nats），防 posterior collapse
+  kl_warmup_epochs: 2        # KL 线性 warm-up 的 epoch 数
+
+# 多候选模型（model.type=candidates 时生效）
+candidates:
+  k: 8                     # 每样本候选数（先验采样）
+  z_dim: 16                # 片段级潜变量维度
+  lambda_div: 1.0          # 多样性项权重
+  div_target: 0.02         # rad：候选两两距离达到该值多样性项为 0（有上界）
+  lambda_smooth: 0.5       # 平滑项权重（每条候选）
+  acc_ceiling: 0.004       # rad/帧²：二阶差分 hinge 阈值（≈200°/s²，目标 P90≈0.0039）
+  lambda_amp: 1.0          # 幅度项权重（每条候选）
+  amp_ceiling: 0.25        # rad：单帧幅度 hinge 阈值（≈14.3°，目标单帧 P90≈0.13）
+
+loss:
+  w_pose: 1.0
+  w_velocity: 0.5
+  w_acceleration: 0.1
+  # 分项损失尺度（依据 train target 实际分位数，弧度）：
+  #   |rpy|   P50=0.029 P75=0.069 P90=0.131
+  #   |Δ|/帧  P50=0.0015 P75=0.0038（≈2.6°/s ~ 6.6°/s）
+  #   |Δ²|/帧² P50=0.0009 P75=0.0020（≈44°/s² ~ 101°/s²）
+  # 速度/加速度用 L1（量级太小，SmoothL1 二次区会把梯度再次压弱）；
+  # 若改 smooth_l1，β 建议 velocity=0.004、acceleration=0.002（约 P75）。
+  pose:
+    mode: smooth_l1
+    beta: 0.1
+  velocity:
+    mode: l1
+  acceleration:
+    mode: l1
+
+train:
+  epochs: 30
+  batch_size: 16
+  learning_rate: 1.0e-4
+  weight_decay: 1.0e-5
+  num_workers: 4
+  seed: 42
+  grad_clip: 1.0
+  log_every: 20                # 每 N 个 batch 打印一次训练 loss
+  scheduler: cosine            # none | cosine（余弦退火到 0）
+  output_dir: outputs/neck_motion
+  pin_memory: true

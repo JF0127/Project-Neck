@@ -1,0 +1,571 @@
+extern "C" {
+#include "ethercat.h"
+#include "motor_control.h"
+#include "transmit.h"
+}
+
+#include "queue.h"
+#include <sys/time.h>
+#include <chrono>
+#include <cinttypes>
+#include <cstdio>
+#include <cstring>
+#include <mutex>
+#include "time.h"
+#define EC_TIMEOUTM
+
+spsc_queue<Queue_Msg_ptr, capacity<10>> messages[SLAVE_NUMBER];
+std::atomic<bool> running{false};
+std::thread runThread;
+
+
+char IOmap[4096];
+OSAL_THREAD_HANDLE checkThread;
+int expectedWKC;
+boolean needlf;
+volatile int wkc;
+boolean inOP;
+uint8 currentgroup = 0;
+uint64_t num;
+bool isConfig[SLAVE_NUMBER]{false};
+static std::mutex neckFrameMutex;
+static EtherCAT_Msg neckFrames[SLAVE_NUMBER]{};
+static bool neckFrameActive[SLAVE_NUMBER]{false};
+
+extern "C" bool NeckFramePublish(int slaveId, const EtherCAT_Msg* frame)
+{
+    if (!frame || !running || slaveId < 0 || slaveId >= ec_slavecount || slaveId >= SLAVE_NUMBER)
+        return false;
+    std::lock_guard<std::mutex> lock(neckFrameMutex);
+    neckFrames[slaveId] = *frame;
+    neckFrameActive[slaveId] = true;
+    return true;
+}
+
+extern "C" void NeckFrameStop(int slaveId)
+{
+    if (slaveId < 0 || slaveId >= SLAVE_NUMBER)
+        return;
+    std::lock_guard<std::mutex> lock(neckFrameMutex);
+    neckFrameActive[slaveId] = false;
+}
+
+// ---------- 反馈快照（供 Neck Trajectory Executor 使用） ----------
+static std::mutex neckFbMutex;
+static OD_Motor_Msg neckFb[SLAVE_NUMBER][6]{};
+static uint64_t neckFbTsMs[SLAVE_NUMBER]{};
+static bool neckFbValid[SLAVE_NUMBER]{}; // 粘性：该从站曾收到过有效电机应答
+
+static uint64_t neckMonotonicMs()
+{
+    using namespace std::chrono;
+    return (uint64_t)duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+}
+
+static void NeckFeedbackStore(int slave, const OD_Motor_Msg* msg, bool receivedAny)
+{
+    std::lock_guard<std::mutex> lock(neckFbMutex);
+    for (int i = 0; i < 6; ++i)
+        neckFb[slave][i] = msg[i];
+    neckFbTsMs[slave] = neckMonotonicMs();
+    if (receivedAny)
+        neckFbValid[slave] = true;
+}
+
+extern "C" bool NeckFeedbackGet(int slave, double joint_deg[3], uint8_t error[3],
+                                double temperature[3], uint64_t* ts_ms)
+{
+    if (slave < 0 || slave >= SLAVE_NUMBER)
+        return false;
+    std::lock_guard<std::mutex> lock(neckFbMutex);
+    if (!neckFbValid[slave])
+        return false; // 从未收到过应答（如刚启动尚未查询），视为无反馈
+    // 取前三个通道（1/2/3 = CAN1，对应 m1/m2/m3 下发通道）
+    joint_deg[0] = neckFb[slave][0].angle_actual_float;
+    joint_deg[1] = neckFb[slave][1].angle_actual_float;
+    joint_deg[2] = neckFb[slave][2].angle_actual_float;
+    error[0] = neckFb[slave][0].error;
+    error[1] = neckFb[slave][1].error;
+    error[2] = neckFb[slave][2].error;
+    temperature[0] = neckFb[slave][0].temperature;
+    temperature[1] = neckFb[slave][1].temperature;
+    temperature[2] = neckFb[slave][2].temperature;
+    *ts_ms = neckFbTsMs[slave];
+    return true;
+}
+
+extern "C" bool NeckCommSnapshotGet(NeckCommSnapshot* out)
+{
+    if (!out)
+        return false;
+    out->running = running ? 1 : 0;
+    out->slavecount = ec_slavecount;
+    out->wkc = wkc;
+    out->expected_wkc = expectedWKC;
+    out->in_op = inOP ? 1 : 0;
+    return true;
+}
+
+#define EC_TIMEOUTMON 500
+
+void EtherCAT_Data_Get();
+
+void EtherCAT_Command_Set();
+
+static void degraded_handler()
+{
+    printf("[EtherCAT Error] Logging error...\n");
+    time_t current_time = time(NULL);
+    char* time_str = ctime(&current_time);
+    printf("ESTOP. EtherCAT became degraded at %s.\n", time_str);
+    printf("[EtherCAT Error] Stopping RT process.\n");
+}
+
+static int run_ethercat(const char* ifname)
+{
+    int i;
+    int oloop, iloop, chk;
+    needlf = FALSE;
+    inOP = FALSE;
+
+    num = 1;
+
+    /* initialise SOEM, bind socket to ifname */
+    if (ec_init(ifname))
+    {
+        printf("[EtherCAT Init] Initialization on device %s succeeded.\n", ifname);
+        /* find and auto-config slaves */
+
+        if (ec_config_init(FALSE) > 0)
+        {
+            printf("[EtherCAT Init] %d slaves found and configured.\n", ec_slavecount);
+            if (ec_slavecount < SLAVE_NUMBER)
+            {
+                printf("[RT EtherCAT] Warning: Expected %d slaves, found %d.\n", SLAVE_NUMBER, ec_slavecount);
+            }
+
+            for (int slave_idx = 0; slave_idx < ec_slavecount; slave_idx++)
+                ec_slave[slave_idx + 1].CoEdetails &= ~ECT_COEDET_SDOCA;
+
+            ec_config_map(&IOmap);
+            ec_configdc();
+
+            printf("[EtherCAT Init] Mapped slaves.\n");
+            /* wait for all slaves to reach SAFE_OP state */
+            ec_statecheck(0, EC_STATE_SAFE_OP, EC_TIMEOUTSTATE * SLAVE_NUMBER);
+
+            for (int slave_idx = 0; slave_idx < ec_slavecount; slave_idx++)
+            {
+                printf("[SLAVE %d]\n", slave_idx);
+                printf("  IN  %d bytes, %d bits\n", ec_slave[slave_idx].Ibytes, ec_slave[slave_idx].Ibits);
+                printf("  OUT %d bytes, %d bits\n", ec_slave[slave_idx].Obytes, ec_slave[slave_idx].Obits);
+                printf("\n");
+            }
+
+            oloop = ec_slave[0].Obytes;
+            if ((oloop == 0) && (ec_slave[0].Obits > 0))
+                oloop = 1;
+            if (oloop > 8)
+                oloop = 8;
+            iloop = ec_slave[0].Ibytes;
+            if ((iloop == 0) && (ec_slave[0].Ibits > 0))
+                iloop = 1;
+            if (iloop > 8)
+                iloop = 8;
+
+            printf("[EtherCAT Init] segments : %d : %d %d %d %d\n", ec_group[0].nsegments, ec_group[0].IOsegment[0],
+                   ec_group[0].IOsegment[1], ec_group[0].IOsegment[2], ec_group[0].IOsegment[3]);
+
+            printf("[EtherCAT Init] Requesting operational state for all slaves...\n");
+            expectedWKC = (ec_group[0].outputsWKC * 2) + ec_group[0].inputsWKC;
+            printf("[EtherCAT Init] Calculated workcounter %d\n", expectedWKC);
+            ec_slave[0].state = EC_STATE_OPERATIONAL;
+            /* send one valid process data to make outputs in slaves happy*/
+            ec_send_processdata();
+            ec_receive_processdata(EC_TIMEOUTRET);
+            /* request OP state for all slaves */
+            ec_writestate(0);
+            chk = 40;
+            /* wait for all slaves to reach OP state */
+            do
+            {
+                ec_send_processdata();
+                ec_receive_processdata(EC_TIMEOUTRET);
+                ec_statecheck(0, EC_STATE_OPERATIONAL, 50000);
+            }
+            while (chk-- && (ec_slave[0].state != EC_STATE_OPERATIONAL));
+
+            if (ec_slave[0].state == EC_STATE_OPERATIONAL)
+            {
+                printf("[EtherCAT Init] Operational state reached for all slaves.\n");
+                inOP = TRUE;
+                return 1;
+            }
+            else
+            {
+                printf("[EtherCAT Error] Not all slaves reached operational state.\n");
+                ec_readstate();
+                for (i = 1; i <= ec_slavecount; i++)
+                {
+                    if (ec_slave[i].state != EC_STATE_OPERATIONAL)
+                    {
+                        printf("[EtherCAT Error] Slave %d State=0x%2.2x StatusCode=0x%4.4x : %s\n",
+                               i, ec_slave[i].state, ec_slave[i].ALstatuscode,
+                               ec_ALstatuscode2string(ec_slave[i].ALstatuscode));
+                    }
+                }
+            }
+        }
+        else
+        {
+            printf("[EtherCAT Error] No slaves found!\n");
+        }
+    }
+    else
+    {
+        printf("[EtherCAT Error] No socket connection on %s - are you running run.sh?\n", ifname);
+    }
+    return 0;
+}
+
+static int err_count = 0;
+static int err_iteration_count = 0;
+/**@brief EtherCAT errors are measured over this period of loop iterations */
+#define K_ETHERCAT_ERR_PERIOD 100
+
+/**@brief Maximum number of etherCAT errors before a fault per period of loop iterations */
+#define K_ETHERCAT_ERR_MAX 20
+
+static OSAL_THREAD_FUNC ecatcheck(void* ptr)
+{
+    (void)ptr;
+    int slave = 0;
+    while (1)
+    {
+        // count errors
+        if (err_iteration_count > K_ETHERCAT_ERR_PERIOD)
+        {
+            err_iteration_count = 0;
+            err_count = 0;
+        }
+
+        if (err_count > K_ETHERCAT_ERR_MAX)
+        {
+            // possibly shut down
+            printf("[EtherCAT Error] EtherCAT connection degraded.\n");
+            printf("[Simulink-Linux] Shutting down....\n");
+            degraded_handler();
+            break;
+        }
+        err_iteration_count++;
+
+        if (inOP && ((wkc < expectedWKC) || ec_group[currentgroup].docheckstate))
+        {
+            if (needlf)
+            {
+                needlf = FALSE;
+                printf("\n");
+            }
+            /* one ore more slaves are not responding */
+            ec_group[currentgroup].docheckstate = FALSE;
+            ec_readstate();
+            for (slave = 1; slave <= ec_slavecount; slave++)
+            {
+                if ((ec_slave[slave].group == currentgroup) && (ec_slave[slave].state != EC_STATE_OPERATIONAL))
+                {
+                    ec_group[currentgroup].docheckstate = TRUE;
+                    if (ec_slave[slave].state == (EC_STATE_SAFE_OP + EC_STATE_ERROR))
+                    {
+                        printf("[EtherCAT Error] Slave %d is in SAFE_OP + ERROR, attempting ack.\n", slave);
+                        ec_slave[slave].state = (EC_STATE_SAFE_OP + EC_STATE_ACK);
+                        ec_writestate(slave);
+                        err_count++;
+                    }
+                    else if (ec_slave[slave].state == EC_STATE_SAFE_OP)
+                    {
+                        printf("[EtherCAT Error] Slave %d is in SAFE_OP, change to OPERATIONAL.\n", slave);
+                        ec_slave[slave].state = EC_STATE_OPERATIONAL;
+                        ec_writestate(slave);
+                        err_count++;
+                    }
+                    else if (ec_slave[slave].state > 0)
+                    {
+                        if (ec_reconfig_slave(slave, EC_TIMEOUTMON))
+                        {
+                            ec_slave[slave].islost = FALSE;
+                            printf("[EtherCAT Status] Slave %d reconfigured\n", slave);
+                        }
+                    }
+                    else if (!ec_slave[slave].islost)
+                    {
+                        /* re-check state */
+                        ec_statecheck(slave, EC_STATE_OPERATIONAL, EC_TIMEOUTRET);
+                        if (!ec_slave[slave].state)
+                        {
+                            ec_slave[slave].islost = TRUE;
+                            printf("[EtherCAT Error] Slave %d lost\n", slave);
+                            err_count++;
+                        }
+                    }
+                }
+                if (ec_slave[slave].islost)
+                {
+                    if (!ec_slave[slave].state)
+                    {
+                        if (ec_recover_slave(slave, EC_TIMEOUTMON))
+                        {
+                            ec_slave[slave].islost = FALSE;
+                            printf("[EtherCAT Status] Slave %d recovered\n", slave);
+                        }
+                    }
+                    else
+                    {
+                        ec_slave[slave].islost = FALSE;
+                        printf("[EtherCAT Status] Slave %d found\n", slave);
+                    }
+                }
+            }
+            if (!ec_group[currentgroup].docheckstate)
+                printf("[EtherCAT Status] All slaves resumed OPERATIONAL.\n");
+        }
+        osal_usleep(50000);
+    }
+}
+
+void EtherCAT_Init(char* ifname)
+{
+    int i;
+    int rc;
+    printf("[EtherCAT] Initializing EtherCAT\n");
+    osal_thread_create((void*)&checkThread, 128000, (void*)&ecatcheck, (void*)&ctime);
+    for (i = 1; i < 10; i++)
+    {
+        printf("[EtherCAT] Attempting to start EtherCAT, try %d of 10.\n", i);
+        rc = run_ethercat(ifname);
+        if (rc)
+            break;
+        osal_usleep(1000000);
+    }
+    if (rc)
+        printf("[EtherCAT] EtherCAT successfully initialized on attempt %d \n", i);
+    else
+    {
+        printf("[EtherCAT Error] Failed to initialize EtherCAT after 100 tries. \n");
+    }
+}
+
+void EtherCAT_Transmit(EtherCAT_Msg* MasterCommand)
+{
+    for (int i = 0; i < ec_slavecount; i++)
+    {
+        memcpy((void*)(ec_slave[0].outputs + i * sizeof(EtherCAT_Msg)), (void*)&(MasterCommand[i]),
+               sizeof(EtherCAT_Msg));
+    }
+    ec_send_processdata();
+}
+
+static int wkc_err_count = 0;
+static int wkc_err_iteration_count = 0;
+
+//数组大小根据从站数量确定
+EtherCAT_Msg Rx_Message[SLAVE_NUMBER];
+EtherCAT_Msg Tx_Message[SLAVE_NUMBER];
+
+OD_Motor_Msg Rx_Motor_Msg[SLAVE_NUMBER][6];
+/**
+ * @description:
+ * @return {*}
+ */
+void EtherCAT_Run()
+{
+    if (wkc_err_iteration_count > K_ETHERCAT_ERR_PERIOD)
+    {
+        wkc_err_count = 0;
+        wkc_err_iteration_count = 0;
+    }
+    if (wkc_err_count > K_ETHERCAT_ERR_MAX)
+    {
+        printf("[EtherCAT Error] Error count too high!\n");
+        degraded_handler();
+    }
+    // send
+    EtherCAT_Command_Set();
+    ec_send_processdata();
+    // receive
+    wkc = ec_receive_processdata(EC_TIMEOUTRET);
+    EtherCAT_Data_Get();
+    //  check for dropped packet
+    if (wkc < expectedWKC)
+    {
+        printf("\x1b[31m[EtherCAT Error] Dropped packet (Bad WKC!)\x1b[0m\n");
+        wkc_err_count++;
+    }
+    else
+    {
+        needlf = TRUE;
+    }
+    wkc_err_iteration_count++;
+}
+
+/**
+ * @description: slave data get
+ * @return {*}
+ * @author: Kx Zhang
+ */
+void EtherCAT_Data_Get()
+{
+    for (int slave = 0; slave < ec_slavecount; ++slave)
+    {
+        EtherCAT_Msg* slave_src = (EtherCAT_Msg*)(ec_slave[slave + 1].inputs);
+        if (slave_src)
+            Rx_Message[slave] = *(EtherCAT_Msg*)(ec_slave[slave + 1].inputs);
+
+        RV_can_data_repack(&Rx_Message[slave], comm_ack, Rx_Motor_Msg[slave], slave, isConfig[slave]);
+        bool receivedAny = false;
+        for (int i = 0; i < 6; ++i)
+            if (Rx_Message[slave].motor[i].dlc != 0) {
+                receivedAny = true;
+                break;
+            }
+        NeckFeedbackStore(slave, Rx_Motor_Msg[slave], receivedAny);
+
+        if (isConfig[slave])
+        {
+            isConfig[slave] = false;
+        }
+    }
+}
+
+/**
+ * @description: slave command set
+ * @return {*}
+ * @author: Kx Zhang
+ */
+#define frequency 1000
+#define POS_SPD (3.14/frequency)
+float pos_set = 0, delta_pos = POS_SPD;
+static int i = 0;
+
+
+// 使用命令行控制电机的例程
+void EtherCAT_Command_Set()
+{
+    static int state[SLAVE_NUMBER];
+    for (int slave = 0; slave < ec_slavecount; ++slave)
+    {
+        bool frameActive = false;
+        {
+            std::lock_guard<std::mutex> lock(neckFrameMutex);
+            if (neckFrameActive[slave]) {
+                Tx_Message[slave] = neckFrames[slave];
+                frameActive = true;
+            }
+        }
+
+        Queue_Msg_ptr msg;
+        if (!frameActive && state[slave] == 0)
+        {
+            if (messages[slave].pop(msg))
+            {
+                Tx_Message[slave].motor[msg->passage - 1] = msg->motor;
+                state[slave] = 1;
+            }
+        }
+        else if (!frameActive && state[slave]++ == 10)
+        {
+            isConfig[slave] = true;
+            state[slave] = 0;
+        }
+
+        EtherCAT_Msg* slave_dest = (EtherCAT_Msg*)(ec_slave[slave + 1].outputs);
+        if (slave_dest)
+            *(EtherCAT_Msg*)(ec_slave[slave + 1].outputs) = Tx_Message[slave];
+    }
+}
+
+// 一个从站控制一个电机
+// void EtherCAT_Command_Set() {
+
+//     static int state;
+
+//     // int slave = 0;
+
+//     set_motor_speed(&Tx_Message[0], 2, 1, 50, 50, 2);
+
+//     // if(state == 0) {
+//     //     // 设置电机零点
+//     //     MotorSetting(&Tx_Message[0], 1, 0x03);
+//     //     state = 1;
+//     // } else if (state < 2000) {
+//     //     // 小于2000也就是2000ms内转到90度的位置
+//     //     state++;
+//     //     set_motor_position(&Tx_Message[0], 1, 1, 90, 100, 50, 2);
+//     // } else {
+//     //     // 2s后转到180度的位置
+//     //     set_motor_position(&Tx_Message[0], 1, 1, 180, 100, 50, 2);
+//     // }
+
+//     isConfig[0] = true;
+
+//     EtherCAT_Msg *slave_dest = (EtherCAT_Msg *) (ec_slave[1].outputs);
+//     if (slave_dest)
+//         *(EtherCAT_Msg *) (ec_slave[1].outputs) = Tx_Message[0];
+// }
+
+
+// 一个从站控制多个电机
+// void EtherCAT_Command_Set() {
+
+//     // 最多可以控制6个电机（1，2，3在CAN1上面，4，5，6在CAN2上面）
+//     set_motor_speed(&Tx_Message[0], 1, 1, 10, 50, 2);
+//     set_motor_speed(&Tx_Message[0], 2, 3, 20, 50, 2);
+//     set_motor_speed(&Tx_Message[0], 3, 5, 30, 50, 2);
+//     set_motor_speed(&Tx_Message[0], 4, 7, 40, 50, 2);
+//     set_motor_speed(&Tx_Message[0], 5, 9, 50, 50, 2);
+//     set_motor_speed(&Tx_Message[0], 6, 11, 60, 50, 2);
+
+//     EtherCAT_Msg *slave_dest = (EtherCAT_Msg *) (ec_slave[1].outputs);
+//     if (slave_dest)
+//         *(EtherCAT_Msg *) (ec_slave[1].outputs) = Tx_Message[0];
+// }
+
+// 多个从站控制多个电机
+// void EtherCAT_Command_Set() {
+//     static int state[SLAVE_NUMBER];
+//     // ec_slavecount是主站识别到从站的数量
+//     for(int slave = 0; slave < ec_slavecount; ++slave) {
+
+//         if(slave == 0) { // 第一个从站
+//             set_motor_speed(&Tx_Message[slave], 1, 1, 10, 50, 2);
+//         } else if(slave == 1) { // 第二个从站
+//             if(state[slave] == 0) {
+//                 // 设置电机零点
+//                 MotorSetting(&Tx_Message[slave], 1, 0x03);
+//                 state[slave] = 1;
+//             } else {
+//                 set_motor_position(&Tx_Message[slave], 1, 1, 90, 100, 50, 2);
+//             }
+//         }// 如果还有其他从站就继续else if，使用switch也可以
+
+//         EtherCAT_Msg *slave_dest = (EtherCAT_Msg *) (ec_slave[1 + slave].outputs);
+//         if (slave_dest)
+//             *(EtherCAT_Msg *) (ec_slave[1 + slave].outputs) = Tx_Message[slave];
+//     }
+// }
+
+
+void runImpl()
+{
+    while (running)
+    {
+        EtherCAT_Run();
+        usleep(1000);
+    }
+}
+
+
+void startRun()
+{
+    running = true;
+    runThread = std::thread(runImpl);
+}
