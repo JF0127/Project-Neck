@@ -34,3 +34,6 @@ Project-Motor/build/
 
 # ---------------- Project-Motor：审计落盘（保留日志文档 logs/*.md） ----------------
 Project-Motor/logs/audit_*/
+
+# ---------------- whisper 模型(145MB, 可从 hf-mirror 重新下载) ----------------
+model/
