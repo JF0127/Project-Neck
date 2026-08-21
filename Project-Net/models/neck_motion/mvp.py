@@ -121,70 +121,61 @@ def silent_segment(n_frames: int) -> np.ndarray:
     return np.zeros((n_frames, 3), dtype=np.float32)
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser(description="MVP 三态颈部动作调度")
-    ap.add_argument("--checkpoint", required=True)
-    ap.add_argument("--events", required=True, help="事件序列 JSON")
-    ap.add_argument("--data-root", default=None)
-    ap.add_argument("--output-dir", default=None)
-    ap.add_argument("--device", default=None)
-    ap.add_argument("--strategy", choices=["first", "random", "style_fixed", "energy_match"],
-                    default="random")
-    ap.add_argument("--style-idx", type=int, default=0)
-    ap.add_argument("--style-z-path", default=None,
-                    help="style_fixed 的固定 latent 模板 [K, z_dim] npy；缺省自动生成并保存到输出目录")
-    ap.add_argument("--expected-energy", type=float, default=None, help="°/s，energy_match 用")
-    ap.add_argument("--num-candidates", type=int, default=8)
-    ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--blend-sec", type=float, default=0.3, help="段边界线性混合时长")
-    ap.add_argument("--export-json", default=None,
-                    help="输出自描述轨迹 JSON（供外部校验层 loadNeckTrajectoryJson 测试）")
-    args = ap.parse_args()
+def generate(events_spec: dict, checkpoint: str, output_dir: str | None = None,
+             data_root: str | None = None,
+             device: str | None = None, strategy: str = "random",
+             style_idx: int = 0, style_z_path: str | None = None,
+             expected_energy: float | None = None, num_candidates: int = 8,
+             seed: int = 42, blend_sec: float = 0.3,
+             export_json: str | None = None):
+    """MVP 三态轨迹生成（可 import 调用；main() 为 CLI 包装）。
 
-    ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
+    返回 (unified_relative_rpy [T,3] 弧度, states [T], summaries, doc|None)。
+    仅生成不落盘；若 export_json 提供则 doc 非 None（调用方自行写盘）。
+    """
+    ckpt = torch.load(checkpoint, map_location="cpu", weights_only=False)
     cfg = ckpt["config"]
     if cfg.get("model", {}).get("type", "regression") != "candidates":
         raise SystemExit("[mvp] 需要多候选模型 checkpoint（model.type=candidates），"
                          "当前: %s" % cfg.get("model", {}).get("type", "regression"))
-    device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
-    data_root = Path(args.data_root or cfg["data"]["data_root"])
+    dev = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
+    data_root = Path(data_root or cfg["data"]["data_root"])
 
     vocab_path = Path(ckpt["vocab_path"])
     if not vocab_path.exists():
-        vocab_path = Path(args.checkpoint).parent / vocab_path.name
+        vocab_path = Path(checkpoint).parent / vocab_path.name
     vocab = Vocab.load(vocab_path)
 
-    with open(args.events, "r", encoding="utf-8") as f:
-        spec = json.load(f)
-    events = spec["events"]
-    init_rpy = np.asarray(spec.get("robot_actual_initial", [0.0, 0.0, 0.0]), dtype=np.float64)
+    events = events_spec["events"]
+    init_rpy = np.asarray(events_spec.get("robot_actual_initial", [0.0, 0.0, 0.0]), dtype=np.float64)
     if init_rpy.shape != (3,):
         raise ValueError("robot_actual_initial 必须是 [roll, pitch, yaw]")
-    neutral_rpy = np.asarray(spec.get("robot_neutral_pose", [0.0, 0.0, 0.0]), dtype=np.float64)
+    neutral_rpy = np.asarray(events_spec.get("robot_neutral_pose", [0.0, 0.0, 0.0]), dtype=np.float64)
     if neutral_rpy.shape != (3,):
         raise ValueError("robot_neutral_pose 必须是 [roll, pitch, yaw]（机器人标定中位）")
 
-    model = build_model_any(cfg, vocab_size=len(vocab)).to(device)
+    model = build_model_any(cfg, vocab_size=len(vocab)).to(dev)
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
-    torch.manual_seed(args.seed)          # 固定候选采样（同 seed 跨运行可复现）
-    if device.type == "cuda":
-        torch.cuda.manual_seed_all(args.seed)
-    rng = np.random.default_rng(args.seed)
+    torch.manual_seed(seed)          # 固定候选采样（同 seed 跨运行可复现）
+    if dev.type == "cuda":
+        torch.cuda.manual_seed_all(seed)
+    rng = np.random.default_rng(seed)
 
-    out_dir = Path(args.output_dir or (Path(cfg["train"]["output_dir"]) / "mvp" / time.strftime("%Y%m%d_%H%M%S")))
+    out_dir = Path(output_dir) if output_dir else \
+        (Path(cfg["train"]["output_dir"]) / "mvp" / time.strftime("%Y%m%d_%H%M%S"))
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # style_fixed 的固定 latent 模板（同一风格跨段/跨调用可复现）
     style_z = None
-    if args.strategy == "style_fixed":
-        if args.style_z_path and Path(args.style_z_path).exists():
-            style_z = np.load(args.style_z_path).astype(np.float32)
-            if style_z.shape != (args.num_candidates, model.z_dim):
-                raise ValueError(f"style latent 形状 {style_z.shape} != [K={args.num_candidates}, z_dim={model.z_dim}]")
-            print(f"[mvp] 使用固定 latent 模板: {args.style_z_path}")
+    if strategy == "style_fixed":
+        if style_z_path and Path(style_z_path).exists():
+            style_z = np.load(style_z_path).astype(np.float32)
+            if style_z.shape != (num_candidates, model.z_dim):
+                raise ValueError(f"style latent 形状 {style_z.shape} != [K={num_candidates}, z_dim={model.z_dim}]")
+            print(f"[mvp] 使用固定 latent 模板: {style_z_path}")
         else:
-            style_z = np.random.default_rng(0).standard_normal((args.num_candidates, model.z_dim)).astype(np.float32)
+            style_z = np.random.default_rng(0).standard_normal((num_candidates, model.z_dim)).astype(np.float32)
             z_path = out_dir / "style_z.npy"
             np.save(z_path, style_z)
             print(f"[mvp] 已生成固定 latent 模板: {z_path}（seed=0，风格可复现）")
@@ -207,20 +198,20 @@ def main() -> None:
             frag = ev["fragment"]
             batch = build_inference_batch(frag, vocab, data_root, int(cfg["data"]["target_sr"]))
             N = batch["num_frames"]
-            batch = {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in batch.items()}
-            expected = args.expected_energy
-            if expected is None and args.strategy == "energy_match":
+            batch = {k: (v.to(dev) if torch.is_tensor(v) else v) for k, v in batch.items()}
+            expected = expected_energy
+            if expected is None and strategy == "energy_match":
                 # 启发式期望：speaking 取候选能量中位数；listening 取 P25（更安静）
                 _, _, cands = generate_segment(model, batch, "first", rng,
-                                               args.num_candidates, None, 0, device, fixed_z=style_z)
+                                               num_candidates, None, 0, dev, fixed_z=style_z)
                 en = np.array([candidate_energy(c) for c in cands])
                 expected = float(np.median(en) if st == "speaking" else np.percentile(en, 25))
-                idx, meta = select_candidate(cands, args.strategy, rng, expected, args.style_idx)
+                idx, meta = select_candidate(cands, strategy, rng, expected, style_idx)
                 rel = cands[idx]
                 meta["expected_energy_deg_per_s"] = expected
             else:
-                rel, meta, cands = generate_segment(model, batch, args.strategy, rng,
-                                                    args.num_candidates, expected, args.style_idx, device,
+                rel, meta, cands = generate_segment(model, batch, strategy, rng,
+                                                    num_candidates, expected, style_idx, dev,
                                                     fixed_z=style_z)
             # 段起点姿态合成：R_abs(t) = R_start @ R(rel(t))
             R_seg = R_abs @ rpy_to_matrix(rel)              # [N,3,3]
@@ -241,8 +232,8 @@ def main() -> None:
             raise ValueError(f"未知状态: {st}")
 
         # 与上一段边界混合（统一坐标空间）
-        if unified and args.blend_sec > 0 and n > 1:
-            m = min(int(round(args.blend_sec * fps)), len(unified[-1]) // 2, n // 2)
+        if unified and blend_sec > 0 and n > 1:
+            m = min(int(round(blend_sec * fps)), len(unified[-1]) // 2, n // 2)
             if m > 1:
                 w = np.linspace(0.0, 1.0, m)
                 prev_tail = unified[-1][-m:]
@@ -263,37 +254,9 @@ def main() -> None:
     if not np.isfinite(traj).all():
         raise RuntimeError("输出轨迹包含 NaN/Inf")
 
-    out_dir = Path(args.output_dir or (Path(cfg["train"]["output_dir"]) / "mvp" / time.strftime("%Y%m%d_%H%M%S")))
-    out_dir.mkdir(parents=True, exist_ok=True)
-    np.save(out_dir / "unified_relative_rpy.npy", traj)
-    np.save(out_dir / "states.npy", state_seq)
-    for i, c in enumerate(candidates_all):
-        if c.size:
-            np.save(out_dir / f"candidates_{i}.npy", c)
-    with open(out_dir / "summary.json", "w", encoding="utf-8") as f:
-        json.dump({"strategy": args.strategy, "seed": args.seed,
-                   "num_candidates": args.num_candidates,
-                   "robot_actual_initial": init_rpy.tolist(),
-                   "robot_neutral_pose": neutral_rpy.tolist(),
-                   "total_sec": round(t_total, 3), "segments": summaries},
-                  f, ensure_ascii=False, indent=1)
-
-    print(f"[mvp] 策略={args.strategy} | 总时长 {t_total:.2f}s | {len(events)} 段")
-    for s in summaries:
-        extra = ""
-        if "candidate_idx" in s:
-            extra = (f"候选 {s['candidate_idx']} | 幅度 {s['amp_deg']:.2f}° | "
-                     f"能量 {s['energy_deg_per_s']:.2f}°/s (池 {s['cand_energy_range_deg_per_s'][0]:.1f}–"
-                     f"{s['cand_energy_range_deg_per_s'][1]:.1f})")
-        if "expected_energy_deg_per_s" in s:
-            extra += f" | 期望能量 {s['expected_energy_deg_per_s']:.1f}°/s"
-        print(f"  [{s['index']}] {s['state']:<9} {s['duration_sec']:5.2f}s @ {s['start_sec']:6.2f}s  {extra}")
-    print(f"[mvp] 已保存: {out_dir / 'unified_relative_rpy.npy'}（shape={traj.shape}，"
-          f"相对 robot_actual_initial，首帧 [0,0,0]）")
-    print(f"[mvp] 注意：best-of-K 为 oracle 指标，线上效果取决于候选策略与实机 A/B 测试。")
-
-    # ---------- 自描述轨迹 JSON（阶段 1 离线接入：接口约定显式声明，拒绝猜测） ----------
-    if args.export_json:
+    # 自描述轨迹 JSON 文档（不写盘，由调用方决定）
+    doc = None
+    if export_json is not None:
         max_frame_rate = float(np.abs(np.diff(traj, axis=0)).max(axis=1).max()) * RAD2DEG * fps if len(traj) > 1 else 0.0
         doc = {
             "format_version": "1.0",
@@ -312,16 +275,74 @@ def main() -> None:
             },
             "meta": {
                 "model_type": cfg.get("model", {}).get("type"),
-                "checkpoint": str(args.checkpoint),
-                "strategy": args.strategy,
-                "seed": args.seed,
-                "num_candidates": args.num_candidates,
-                "blend_sec": args.blend_sec,
+                "checkpoint": str(checkpoint),
+                "strategy": strategy,
+                "seed": seed,
+                "num_candidates": num_candidates,
+                "blend_sec": blend_sec,
                 "max_frame_rate_deg_per_s": round(max_frame_rate, 3),
                 "segments": summaries,
                 "generated_by": "models/neck_motion/mvp.py",
             },
         }
+    # 落盘（与旧 main() 行为一致）
+    np.save(out_dir / "unified_relative_rpy.npy", traj)
+    np.save(out_dir / "states.npy", state_seq)
+    for i, c in enumerate(candidates_all):
+        if c.size:
+            np.save(out_dir / f"candidates_{i}.npy", c)
+    with open(out_dir / "summary.json", "w", encoding="utf-8") as f:
+        json.dump({"strategy": strategy, "seed": seed,
+                   "num_candidates": num_candidates,
+                   "robot_actual_initial": init_rpy.tolist(),
+                   "robot_neutral_pose": neutral_rpy.tolist(),
+                   "total_sec": round(t_total, 3), "segments": summaries},
+                  f, ensure_ascii=False, indent=1)
+    print(f"[mvp] 策略={strategy} | 总时长 {t_total:.2f}s | {len(events)} 段")
+    for s in summaries:
+        extra = ""
+        if "candidate_idx" in s:
+            extra = (f"候选 {s['candidate_idx']} | 幅度 {s['amp_deg']:.2f}° | "
+                     f"能量 {s['energy_deg_per_s']:.2f}°/s (池 {s['cand_energy_range_deg_per_s'][0]:.1f}–"
+                     f"{s['cand_energy_range_deg_per_s'][1]:.1f})")
+        if "expected_energy_deg_per_s" in s:
+            extra += f" | 期望能量 {s['expected_energy_deg_per_s']:.1f}°/s"
+        print(f"  [{s['index']}] {s['state']:<9} {s['duration_sec']:5.2f}s @ {s['start_sec']:6.2f}s  {extra}")
+    print(f"[mvp] 已保存: {out_dir / 'unified_relative_rpy.npy'}（shape={traj.shape}，"
+          f"相对 robot_actual_initial，首帧 [0,0,0]）")
+    print(f"[mvp] 注意：best-of-K 为 oracle 指标，线上效果取决于候选策略与实机 A/B 测试。")
+    return traj, state_seq, summaries, doc
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description="MVP 三态颈部动作调度")
+    ap.add_argument("--checkpoint", required=True)
+    ap.add_argument("--events", required=True, help="事件序列 JSON")
+    ap.add_argument("--data-root", default=None)
+    ap.add_argument("--output-dir", default=None)
+    ap.add_argument("--device", default=None)
+    ap.add_argument("--strategy", choices=["first", "random", "style_fixed", "energy_match"],
+                    default="random")
+    ap.add_argument("--style-idx", type=int, default=0)
+    ap.add_argument("--style-z-path", default=None,
+                    help="style_fixed 的固定 latent 模板 [K, z_dim] npy；缺省自动生成并保存到输出目录")
+    ap.add_argument("--expected-energy", type=float, default=None, help="°/s，energy_match 用")
+    ap.add_argument("--num-candidates", type=int, default=8)
+    ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--blend-sec", type=float, default=0.3, help="段边界线性混合时长")
+    ap.add_argument("--export-json", default=None,
+                    help="输出自描述轨迹 JSON（供外部校验层 loadNeckTrajectoryJson 测试）")
+    args = ap.parse_args()
+    with open(args.events, "r", encoding="utf-8") as f:
+        spec = json.load(f)
+
+    traj, state_seq, summaries, doc = generate(
+        spec, args.checkpoint, args.output_dir, args.data_root, args.device, args.strategy,
+        args.style_idx, args.style_z_path, args.expected_energy,
+        args.num_candidates, args.seed, args.blend_sec, args.export_json)
+
+    # 导出自描述轨迹 JSON（若要求）
+    if doc is not None:
         json_path = Path(args.export_json)
         json_path.parent.mkdir(parents=True, exist_ok=True)
         with open(json_path, "w", encoding="utf-8") as f:

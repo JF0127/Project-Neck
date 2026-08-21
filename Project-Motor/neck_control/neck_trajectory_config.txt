@@ -28,7 +28,7 @@ calib.use_neck_config_neutral = true
 # ==================== 控制循环 ====================
 loop.rate_hz = 100                # 硬件控制频率（>= 30 Hz）
 loop.watchdog_timeout_ms = 1000   # 控制循环心跳超时（进程级 watchdog 触发制动）
-input.fps_min = 5                 # 上游 fps 允许范围
+input.fps_min = 1                 # 上游 fps 允许范围（关键点轨迹 fps≈1.1~2）
 input.fps_max = 120
 input.max_trajectory_frames = 200000
 input.max_timestamp_skew_s = 5    # 时间戳新鲜度（实机模式强制；纪元需与上游一致）
@@ -42,9 +42,11 @@ safety.rpy_limits_deg = -40,25,-35,35,-117,58
 safety.joint_limits_deg = -85,64,-34,113,60,235
 # ---- 待实机标定项（当前为保守占位，不得直接用于实机）----
 # 电机输出轴速度/加速度/jerk 上限（度制）。未实机确认前保持保守值。
+# B 档(2026-08-21): jerk 300→1000(阶梯第一级), 换取动作幅度/同步;
+# 实机验证电机跟踪能力, 不满可回退 300 或再上 2000。
 safety.max_velocity_deg_s = 25,25,30
 safety.max_acceleration_deg_s2 = 60,60,90
-safety.max_jerk_deg_s3 = 300,300,450
+safety.max_jerk_deg_s3 = 1000,1000,1500
 # ---- 容差与超时 ----
 safety.max_start_pose_error_deg = 5
 safety.max_tracking_error_deg = 3

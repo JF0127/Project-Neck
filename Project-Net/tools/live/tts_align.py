@@ -107,9 +107,14 @@ def tts_align(text: str, name: str, out_dir: str | Path,
     wav_path = out_dir / "audio" / f"{name}.wav"
     words_path = out_dir / f"words_{name}.json"
 
-    # 1) TTS 合成
+    # 1) TTS 合成(带硬超时: 网络不通时避免永久挂起)
     t0 = time.time()
-    asyncio.run(edge_tts.Communicate(text, voice).save(str(mp3_path)))
+    try:
+        asyncio.run(asyncio.wait_for(
+            edge_tts.Communicate(text, voice).save(str(mp3_path)), timeout=20.0))
+    except (asyncio.TimeoutError, Exception) as e:
+        raise RuntimeError(
+            f"TTS 合成超时/失败({e}); 请检查网络(需要访问微软 edge-tts 服务)") from e
     print(f"[tts_align] TTS 合成 {name}.mp3 ({time.time()-t0:.1f}s, voice={voice})")
 
     # 2) 解码 → 16k mono wav(复用项目加载逻辑, 保证与训练一致)
@@ -149,7 +154,8 @@ def main() -> None:
                     help="输出目录(默认 Project-Neck/neck_l1)")
     ap.add_argument("--voice", default=DEFAULT_VOICE, help="edge-tts 音色")
     ap.add_argument("--language", default="en", help="whisper 语言(数据集为英文, 默认 en)")
-    ap.add_argument("--whisper-model", default="base", help="whisper 模型尺寸(base 下载快, small 更准)")
+    ap.add_argument("--whisper-model", default=str(Path(__file__).resolve().parents[3] / "model"),
+                    help="whisper 模型路径(默认本地 Project-Neck/model; 传尺寸名会从 HF 下载)")
     ap.add_argument("--device", default=None, help="cuda/cpu, 默认自动")
     args = ap.parse_args()
 

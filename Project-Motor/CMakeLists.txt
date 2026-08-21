@@ -54,6 +54,10 @@ target_link_libraries(master_stack_test motor neckcore soem cpp-readline)
 add_executable(neck_meas2model tools/neck_meas2model.cpp)
 target_link_libraries(neck_meas2model neckcore Threads::Threads)
 
+# ---- 轨迹离线预检工具（dry-run/mock，无需 root）----
+add_executable(neck_traj_dryrun tools/neck_traj_dryrun.cpp)
+target_link_libraries(neck_traj_dryrun neckcore Threads::Threads)
+
 # ---- 自动测试（dry-run / mock 级别；无需网卡与 root）----
 enable_testing()
 add_executable(neck_control_tests test/neck_control_tests.cpp)

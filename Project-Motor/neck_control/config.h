@@ -49,7 +49,7 @@ struct NeckControlConfig {
     // ============ 控制循环 ============
     double loop_rate_hz = 100.0;    // 硬件控制频率（>= 30 Hz）
     double watchdog_timeout_ms = 1000.0; // 控制循环心跳超时（进程级 watchdog 触发制动）
-    double fps_min = 5.0;           // 上游 fps 允许范围
+    double fps_min = 1.0;           // 上游 fps 允许范围（关键点轨迹 fps≈1.1~2）
     double fps_max = 120.0;
     int max_trajectory_frames = 200000;  // 防内存滥用上限
     double max_timestamp_skew_s = 5.0;   // 时间戳新鲜度（仅实机模式强制）

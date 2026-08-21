@@ -7,6 +7,7 @@
 #include <cstring>
 #include <limits>
 #include <fstream>
+#include <iomanip>
 #include <thread>
 #include <chrono>
 
@@ -1008,8 +1009,16 @@ unsigned neckTrajStatus(const std::vector<std::string>& input) {
               << (gTrajExecutor->watchdogFired() ? " WATCHDOG_FIRED" : "") << "\n"
               << "[NeckTraj] 进度=" << elapsed << "/" << planned << "s"
               << (planned > 0 ? " (" + std::to_string((int)(100.0 * elapsed / planned)) + "%)" : "")
-              << "\n"
-              << "[NeckTraj] 错误=" << neck_control::neckErrorString(t.last_error)
+              << "\n";
+    // 段边界累计时间(含首段“实际→首帧”过渡段；供外部按段触发事件, 如语音播放)
+    const auto& sd = gTrajExecutor->lastResult().segment_durations;
+    if (!sd.empty()) {
+        std::cout << "[NeckTraj] 段边界(s):";
+        double acc = 0.0;
+        for (double d : sd) { acc += d; std::cout << " " << std::fixed << std::setprecision(2) << acc; }
+        std::cout << "\n";
+    }
+    std::cout << "[NeckTraj] 错误=" << neck_control::neckErrorString(t.last_error)
               << " 消息=" << t.last_error_message << "\n"
               << "[NeckTraj] 最大跟踪误差=" << t.max_tracking_error_deg << "°"
               << " ticks=" << t.ticks << " 发送=" << t.writes_ok
