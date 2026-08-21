@@ -10,7 +10,7 @@
     python tools/live/tts_align.py --text "Hello, nice to meet you." --name user
     python tools/live/tts_align.py --voice en-US-GuyNeural --text "..." --name bot
 
-输出(均在 --out-dir 下, 默认 Project-Net/outputs/neck_l1):
+输出(均在 --out-dir 下, 默认 Project-Neck/neck_l1):
     audio/<name>.wav         16kHz 单声道 wav(模型输入)
     audio/<name>.mp3         原始 TTS 合成(调试/试听用)
     words_<name>.json        [{"text","start_time","end_time"}, ...](与数据集 word_timestamps 同构)
@@ -146,14 +146,14 @@ def main() -> None:
     ap.add_argument("--text", required=True, help="要合成的文本")
     ap.add_argument("--name", default="utterance", help="输出文件名前缀")
     ap.add_argument("--out-dir", default=None,
-                    help="输出目录(默认 Project-Net/outputs/neck_l1)")
+                    help="输出目录(默认 Project-Neck/neck_l1)")
     ap.add_argument("--voice", default=DEFAULT_VOICE, help="edge-tts 音色")
     ap.add_argument("--language", default="en", help="whisper 语言(数据集为英文, 默认 en)")
     ap.add_argument("--whisper-model", default="base", help="whisper 模型尺寸(base 下载快, small 更准)")
     ap.add_argument("--device", default=None, help="cuda/cpu, 默认自动")
     args = ap.parse_args()
 
-    out_dir = args.out_dir or str(Path(__file__).resolve().parents[2] / "outputs" / "neck_l1")
+    out_dir = args.out_dir or str(Path(__file__).resolve().parents[3] / "neck_l1")
     res = tts_align(args.text, args.name, out_dir, args.voice,
                     args.language, args.whisper_model, args.device)
     for w in res["words"]:
