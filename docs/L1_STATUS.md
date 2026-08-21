@@ -92,7 +92,7 @@ S 曲线规划,段时长 = max(S曲线时长, 名义帧间隔 33ms)。在默认�
 
 ## 3. 明日实机步骤(推荐顺序)
 
-### 3.1 生成一轮轨迹(可选,已有 /tmp/neck_l1/trajectory_1.json)
+### 3.1 生成一轮轨迹(可选,已有 Project-Net/outputs/neck_l1/trajectory_1.json)
 
 ```bash
 cd /home/jhl/projects/Project-Neck/Project-Net
@@ -104,8 +104,8 @@ cd /home/jhl/projects/Project-Neck/Project-Net
 
 ```bash
 cd /home/jhl/projects/Project-Neck/Project-Motor/build
-./neck_traj_dryrun /tmp/neck_l1/trajectory_1.json /tmp/audit_l1    # 全管线
-./neck_traj_dryrun /tmp/neck_l1/trajectory_1.json /tmp/audit_mock --mock   # 控制循环
+./neck_traj_dryrun ../Project-Net/outputs/neck_l1/trajectory_1.json /tmp/audit_l1    # 全管线
+./neck_traj_dryrun ../Project-Net/outputs/neck_l1/trajectory_1.json /tmp/audit_mock --mock   # 控制循环
 ```
 
 ### 3.3 实机(需要 root + 硬件)
@@ -114,14 +114,14 @@ cd /home/jhl/projects/Project-Neck/Project-Motor/build
 cd /home/jhl/projects/Project-Neck/Project-Motor && sudo ./build/master_stack_test
 # 在交互 CLI 中:
 > NeckStaticCheck 5          # 静止确认(可选)
-> NeckTrajDryRun /tmp/neck_l1/trajectory_1.json
-> NeckTrajRun    /tmp/neck_l1/trajectory_1.json 0 /tmp/audit_l1_hw
+> NeckTrajDryRun ../Project-Net/outputs/neck_l1/trajectory_1.json
+> NeckTrajRun    ../Project-Net/outputs/neck_l1/trajectory_1.json 0 /tmp/audit_l1_hw
 ```
 
 **同步播放语音**(另一终端):
 ```bash
 # 等 NeckTrajRun 确认动作启动后(说话段前有 ~2.5s+倾听段长缓冲):
-aplay /tmp/neck_l1/audio/bot.wav
+aplay ../Project-Net/outputs/neck_l1/audio/bot.wav
 ```
 > 先做一次**纯动作**(不播语音)验证一轮,再播语音,便于区分问题。
 
@@ -137,7 +137,7 @@ aplay /tmp/neck_l1/audio/bot.wav
 ## 4. 已知问题与备忘
 
 1. **同步问题**(§2)是唯一阻塞项;其余全部通过。
-2. 每次生成时 `trajectory_<n>.json` 为最新;旧轮次保留在 `/tmp/neck_l1/`。
+2. 每次生成时 `trajectory_<n>.json` 为最新;旧轮次保留在 `Project-Net/outputs/neck_l1/`。
 3. `mvp.py` 每轮子进程启动 ~1.6s(含模型加载),L1 可接受;S2 再考虑常驻。
 4. 语音/动作同步的缓冲:说话段前 silent 1.5s + 倾听段 + silent 1.0s,手动操作容差大;
    但受 §2 放慢影响,缓冲实际也放大了,同步以 §2 决策为准。

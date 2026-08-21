@@ -38,7 +38,7 @@ sys.path.insert(0, str(NET_ROOT))
 
 from tools.live.tts_align import tts_align, DEFAULT_VOICE, BOT_VOICE  # noqa: E402
 
-DEFAULT_WORKDIR = "/tmp/neck_l1"
+DEFAULT_WORKDIR = NET_ROOT / "outputs" / "neck_l1"  # 生成物目录(已被 .gitignore 忽略)
 DEFAULT_CHECKPOINT = NET_ROOT / "outputs/neck_motion_v3/checkpoints/best.pt"
 DEFAULT_WHISPER = NET_ROOT.parent / "model"  # 本地 faster-whisper base (Project-Neck/model)
 
@@ -184,7 +184,8 @@ def generate_round(workdir: Path, user_text: str, bot_text: str,
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="L1 轮转式对话一轮主控")
-    ap.add_argument("--workdir", default=DEFAULT_WORKDIR)
+    ap.add_argument("--workdir", default=str(DEFAULT_WORKDIR),
+                    help="工作目录(默认 Project-Net/outputs/neck_l1)")
     ap.add_argument("--checkpoint", default=str(DEFAULT_CHECKPOINT))
     ap.add_argument("--whisper-model", default=str(DEFAULT_WHISPER),
                     help="faster-whisper 模型路径或尺寸")
