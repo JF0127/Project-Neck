@@ -100,7 +100,7 @@ Model Input ────┘
 机器人自身的机械参数进入：
 
 ```text
-neck/neck_config.txt
+neck/neck_config.py
 ```
 
 人工 Demo 动作进入：
@@ -123,7 +123,7 @@ trajectories/*.json
 project/
 │
 ├── neck/
-│   ├── neck_config.txt
+│   ├── neck_config.py
 │   │
 │   ├── neck_config.h
 │   ├── neck_config.cpp
@@ -175,7 +175,7 @@ demo/
 负责读取：
 
 ```text
-neck/neck_config.txt
+neck/neck_config.py
 ```
 
 只负责：
@@ -196,7 +196,7 @@ neck/neck_config.txt
 
 ---
 
-# 5. neck_config.txt
+# 5. neck_config.py
 
 建议结构如下。
 
@@ -1029,7 +1029,7 @@ Demo JSON ───────→   Trajectory
 其中：
 
 ```text
-neck_config.txt
+neck_config.py
 ```
 
 为所有机械和运行参数提供唯一配置来源。

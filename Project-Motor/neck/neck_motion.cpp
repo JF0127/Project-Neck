@@ -31,8 +31,8 @@ EtherCAT_Msg motion_stop_frame{};
 
 bool loadMotionConfig(NeckConfig& config, std::string& error) {
     const std::array<const char*, 2> paths = {
-        "neck/neck_config.txt",
-        "../neck/neck_config.txt"
+        "neck/neck_config.py",
+        "../neck/neck_config.py"
     };
     for (const char* path : paths) {
         std::ifstream probe(path);
@@ -40,7 +40,7 @@ bool loadMotionConfig(NeckConfig& config, std::string& error) {
             return loadNeckConfig(path, config, error);
         }
     }
-    error = "cannot find neck/neck_config.txt (tried current and parent directories)";
+    error = "cannot find neck/neck_config.py (tried current and parent directories)";
     return false;
 }
 

@@ -1,14 +1,14 @@
 # ==============================
 # Hardware
 # ==============================
-network_interface = enp4s0
+network_interface = enp4s0 # type: ignore
 slave_id = 0
 ack_status = 2
 
 # ==============================
 # Motor 1
 # ==============================
-motor1.passage = 1
+motor1.passage = 1 # pyright: ignore[reportUndefinedVariable]
 motor1.id = 1
 motor1.min_position_deg = -85
 motor1.max_position_deg = 64
