@@ -80,23 +80,3 @@ ethercat 从站默认分配六个通道，CAN1通道为1，2，3；CAN2通道为
 * ethercat板子在连接时经常连接不上
   保持稳定供电，从站板供电需要至少500mA的电流，同时不同主站运行速度不同，可能会有所影响
 
-
-## Neck Trajectory Executor（颈部轨迹执行层）
-
-对接上游「颈部 RPY 轨迹生成项目」30 FPS RPY 轨迹的独立安全执行层。详见 `neck_control/README.md`。
-
-- **安全默认**：实机执行（`NeckTrajRun`）默认关闭；需 `mode.hardware_enabled` /
-  `calib.confirmed` / `safety.confirmed` 三把锁全部显式打开，且速度/加速度/jerk 经实机标定确认。
-  未确认前系统明确拒绝实机执行；本仓库自动验证仅到 dry-run 与 mock。
-- **管线**：输入校验 → 坐标转换（旋转矩阵，配置化轴序/符号/固定旋转）→ 线性 IK（复用
-  `neck_config.txt` 标定）→ 角度/速度/加速度/jerk 限制（S 曲线重定时）→ 处理后复验 →
-  时间驱动控制循环（单调时钟，100 Hz）→ 位置伺服指令 → 反馈监控（超时/跟踪误差/急停/故障码）。
-- **CLI**（在 `master_stack_test` 内）：
-  - `NeckTrajDryRun <json> [auditDir]`：离线解析/转换/IK/限幅/重定时，不连接硬件；
-  - `NeckTrajMock <json> [auditDir]`：mock 执行（模拟反馈、超时、急停、跟踪误差）；
-  - `NeckTrajRun <json> [SlaveId] [auditDir]`：实机（三把锁全开才允许）；
-  - `NeckTrajStop / NeckTrajEStop / NeckTrajAck / NeckTrajStatus`。
-- **测试**：`cd build && ctest`（`neck_control_tests`，无需网卡/root）。示例输入
-  `test/upstream_sample.json`，配置 `neck_control/neck_trajectory_config.txt`。
-- **验证顺序**（未确认不跳级）：静态检查/单测 → dry-run → mock → 硬件通信不使能 →
-  单轴 ±2° 低速标定 → 多轴低速空载 → 人工平滑轨迹 → 上游单段轨迹 → Speaking/Listening/Silent 全流程。

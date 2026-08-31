@@ -6,7 +6,6 @@ extern "C" {
 
 #include "queue.h"
 #include <sys/time.h>
-#include <chrono>
 #include <cinttypes>
 #include <cstdio>
 #include <cstring>
@@ -28,82 +27,32 @@ boolean inOP;
 uint8 currentgroup = 0;
 uint64_t num;
 bool isConfig[SLAVE_NUMBER]{false};
+
 static std::mutex neckFrameMutex;
 static EtherCAT_Msg neckFrames[SLAVE_NUMBER]{};
 static bool neckFrameActive[SLAVE_NUMBER]{false};
 
-extern "C" bool NeckFramePublish(int slaveId, const EtherCAT_Msg* frame)
+extern "C" bool NeckFramePublish(int slave_id, const EtherCAT_Msg* frame)
 {
-    if (!frame || !running || slaveId < 0 || slaveId >= ec_slavecount || slaveId >= SLAVE_NUMBER)
+    if (frame == nullptr || !running || slave_id < 0 ||
+        slave_id >= ec_slavecount || slave_id >= SLAVE_NUMBER)
+    {
         return false;
+    }
     std::lock_guard<std::mutex> lock(neckFrameMutex);
-    neckFrames[slaveId] = *frame;
-    neckFrameActive[slaveId] = true;
+    neckFrames[slave_id] = *frame;
+    neckFrameActive[slave_id] = true;
     return true;
 }
 
-extern "C" void NeckFrameStop(int slaveId)
+extern "C" void NeckFrameStop(int slave_id)
 {
-    if (slaveId < 0 || slaveId >= SLAVE_NUMBER)
+    if (slave_id < 0 || slave_id >= SLAVE_NUMBER)
+    {
         return;
+    }
     std::lock_guard<std::mutex> lock(neckFrameMutex);
-    neckFrameActive[slaveId] = false;
-}
-
-// ---------- 反馈快照（供 Neck Trajectory Executor 使用） ----------
-static std::mutex neckFbMutex;
-static OD_Motor_Msg neckFb[SLAVE_NUMBER][6]{};
-static uint64_t neckFbTsMs[SLAVE_NUMBER]{};
-static bool neckFbValid[SLAVE_NUMBER]{}; // 粘性：该从站曾收到过有效电机应答
-
-static uint64_t neckMonotonicMs()
-{
-    using namespace std::chrono;
-    return (uint64_t)duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
-}
-
-static void NeckFeedbackStore(int slave, const OD_Motor_Msg* msg, bool receivedAny)
-{
-    std::lock_guard<std::mutex> lock(neckFbMutex);
-    for (int i = 0; i < 6; ++i)
-        neckFb[slave][i] = msg[i];
-    neckFbTsMs[slave] = neckMonotonicMs();
-    if (receivedAny)
-        neckFbValid[slave] = true;
-}
-
-extern "C" bool NeckFeedbackGet(int slave, double joint_deg[3], uint8_t error[3],
-                                double temperature[3], uint64_t* ts_ms)
-{
-    if (slave < 0 || slave >= SLAVE_NUMBER)
-        return false;
-    std::lock_guard<std::mutex> lock(neckFbMutex);
-    if (!neckFbValid[slave])
-        return false; // 从未收到过应答（如刚启动尚未查询），视为无反馈
-    // 取前三个通道（1/2/3 = CAN1，对应 m1/m2/m3 下发通道）
-    joint_deg[0] = neckFb[slave][0].angle_actual_float;
-    joint_deg[1] = neckFb[slave][1].angle_actual_float;
-    joint_deg[2] = neckFb[slave][2].angle_actual_float;
-    error[0] = neckFb[slave][0].error;
-    error[1] = neckFb[slave][1].error;
-    error[2] = neckFb[slave][2].error;
-    temperature[0] = neckFb[slave][0].temperature;
-    temperature[1] = neckFb[slave][1].temperature;
-    temperature[2] = neckFb[slave][2].temperature;
-    *ts_ms = neckFbTsMs[slave];
-    return true;
-}
-
-extern "C" bool NeckCommSnapshotGet(NeckCommSnapshot* out)
-{
-    if (!out)
-        return false;
-    out->running = running ? 1 : 0;
-    out->slavecount = ec_slavecount;
-    out->wkc = wkc;
-    out->expected_wkc = expectedWKC;
-    out->in_op = inOP ? 1 : 0;
-    return true;
+    neckFrameActive[slave_id] = false;
 }
 
 #define EC_TIMEOUTMON 500
@@ -421,13 +370,6 @@ void EtherCAT_Data_Get()
             Rx_Message[slave] = *(EtherCAT_Msg*)(ec_slave[slave + 1].inputs);
 
         RV_can_data_repack(&Rx_Message[slave], comm_ack, Rx_Motor_Msg[slave], slave, isConfig[slave]);
-        bool receivedAny = false;
-        for (int i = 0; i < 6; ++i)
-            if (Rx_Message[slave].motor[i].dlc != 0) {
-                receivedAny = true;
-                break;
-            }
-        NeckFeedbackStore(slave, Rx_Motor_Msg[slave], receivedAny);
 
         if (isConfig[slave])
         {
@@ -453,17 +395,18 @@ void EtherCAT_Command_Set()
     static int state[SLAVE_NUMBER];
     for (int slave = 0; slave < ec_slavecount; ++slave)
     {
-        bool frameActive = false;
+        bool frame_active = false;
         {
             std::lock_guard<std::mutex> lock(neckFrameMutex);
-            if (neckFrameActive[slave]) {
+            if (neckFrameActive[slave])
+            {
                 Tx_Message[slave] = neckFrames[slave];
-                frameActive = true;
+                frame_active = true;
             }
         }
 
         Queue_Msg_ptr msg;
-        if (!frameActive && state[slave] == 0)
+        if (!frame_active && state[slave] == 0)
         {
             if (messages[slave].pop(msg))
             {
@@ -471,7 +414,7 @@ void EtherCAT_Command_Set()
                 state[slave] = 1;
             }
         }
-        else if (!frameActive && state[slave]++ == 10)
+        else if (!frame_active && state[slave]++ == 10)
         {
             isConfig[slave] = true;
             state[slave] = 0;

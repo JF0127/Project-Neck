@@ -27,21 +27,11 @@ void EtherCAT_Init(char *ifname);
 void EtherCAT_Run();
 void EtherCAT_Command_Set();
 void startRun();
-bool NeckFramePublish(int slaveId, const EtherCAT_Msg* frame);
-void NeckFrameStop(int slaveId);
-// 取从站电机反馈快照（通道 0..2 = 电机 1..3，角度为减速器输出轴角，度）。
-bool NeckFeedbackGet(int slave, double joint_deg[3], uint8_t error[3],
-                     double temperature[3], uint64_t* ts_ms);
 
-// EtherCAT 通信状态快照（诊断用）。
-typedef struct {
-    int running;        // 通信线程运行中
-    int slavecount;     // 识别到的从站数
-    int wkc;            // 最近一次 workcounter
-    int expected_wkc;   // 期望 workcounter
-    int in_op;          // 从站处于 OPERATIONAL
-} NeckCommSnapshot;
-bool NeckCommSnapshotGet(NeckCommSnapshot* out);
+// Publishes one complete three-motor frame as a single control-time target.
+// The real-time EtherCAT loop copies the latest active frame every cycle.
+bool NeckFramePublish(int slave_id, const EtherCAT_Msg* frame);
+void NeckFrameStop(int slave_id);
 
 #ifdef __cplusplus
 };
