@@ -159,6 +159,11 @@ python models/neck_motion/train.py \
     --epochs 30 --batch-size 16 --lr 1e-4 --num-workers 4 --seed 42 \
     --output-dir outputs/neck_motion
 
+python models/neck_motion/train.py \
+    --config models/neck_motion/config.yaml \
+    --epochs 10 --batch-size 16 --lr 1e-4 --num-workers 4 --seed 42 \
+    --output-dir outputs/neck_motion
+
 # 断点续训
 python models/neck_motion/train.py --resume outputs/neck_motion/checkpoints/last.pt
 ```

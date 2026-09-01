@@ -33,7 +33,7 @@ text:
     num_layers: 1
 
 model:
-  type: regression         # regression（确定性基线）| cvae（片段级条件 CVAE）| candidates（多候选）
+  type: candidates         # regression（确定性基线）| cvae（片段级条件 CVAE）| candidates（多候选）
   hidden_dim: 256
   use_audio: true            # 消融：false 时关闭音频分支
   use_text: true             # 消融：false 时关闭当前文本词特征与上下文文本

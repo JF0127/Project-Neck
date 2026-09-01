@@ -72,6 +72,19 @@ python3 -m audio_module.main stream-test --duration 5 --wait-for-robot
 The client prebuffers five robot frames (100 ms), then plays through a bounded Queue and
 prints received/played frame counts, underruns, callback statuses, and maximum Queue depth.
 
+To run two complete user-to-robot turns while reusing one WebSocket connection:
+
+```bash
+python3 -m audio_module.main duplex-test
+```
+
+Defaults are two turns, five microphone seconds per turn, and a 30-second robot timeout.
+They can be adjusted without changing the audio protocol:
+
+```bash
+python3 -m audio_module.main duplex-test --turns 2 --duration 5 --robot-timeout 30
+```
+
 The default endpoint is `ws://10.255.0.35:8765`. Override it when testing locally:
 
 ```bash

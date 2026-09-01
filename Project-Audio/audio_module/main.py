@@ -9,7 +9,7 @@ from pathlib import Path
 
 from . import config
 from .audio_capture import MicrophoneCapture
-from .websocket_client import stream_microphone
+from .websocket_client import run_duplex_test, stream_microphone
 
 
 def validate_config() -> None:
@@ -94,6 +94,27 @@ def websocket_test(
         )
 
 
+def duplex_test(turns: int, duration: float, websocket_url: str, robot_timeout: float) -> None:
+    validate_config()
+    results = asyncio.run(run_duplex_test(turns, duration, websocket_url, robot_timeout))
+    for result in results:
+        print(f"turn number: {result.turn_number}")
+        print(f"  user stream_id: {result.user.stream_id}")
+        print(
+            f"  user frames / bytes: {result.user.frames_sent} / {result.user.total_bytes}"
+        )
+        print(f"  robot stream_id: {result.robot.stream_id}")
+        print(
+            f"  robot frames / bytes: "
+            f"{result.robot.frames_received} / {result.robot.total_bytes}"
+        )
+        print(f"  playback underruns: {result.robot.playback.underruns}")
+        print(
+            f"  connection maintained: "
+            f"{'yes' if result.connection_maintained else 'no'}"
+        )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Robot Head Audio Module V1")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -112,6 +133,17 @@ def parse_args() -> argparse.Namespace:
     stream_parser.add_argument(
         "--robot-timeout", type=float, default=30.0, help="seconds to wait for robot stream"
     )
+    duplex_parser = subparsers.add_parser(
+        "duplex-test", help="run multiple user-to-robot turns on one WebSocket"
+    )
+    duplex_parser.add_argument("--turns", type=int, default=2, help="number of turns (minimum 2)")
+    duplex_parser.add_argument(
+        "--duration", type=float, default=5.0, help="microphone duration per turn"
+    )
+    duplex_parser.add_argument("--url", default=config.WEBSOCKET_URL, help="WebSocket server URL")
+    duplex_parser.add_argument(
+        "--robot-timeout", type=float, default=30.0, help="seconds to wait per robot stream"
+    )
     return parser.parse_args()
 
 
@@ -124,6 +156,8 @@ def main() -> None:
             capture_test(args.duration, args.output)
         elif args.command == "stream-test":
             websocket_test(args.duration, args.url, args.wait_for_robot, args.robot_timeout)
+        elif args.command == "duplex-test":
+            duplex_test(args.turns, args.duration, args.url, args.robot_timeout)
     except KeyboardInterrupt:
         print("Stopped")
 
