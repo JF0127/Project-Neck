@@ -81,7 +81,7 @@ python3 -m pip install -r requirements.txt
 
 需要 PortAudio 和麦克风权限；macOS 缺 PortAudio 时可使用 `brew install portaudio`。
 
-Audio 默认连接地址定义在 `audio_module/config.py`：
+Audio 默认连接地址定义在 `runtime/config.py`：
 
 ```text
 ws://10.255.0.35:8765
@@ -90,7 +90,7 @@ ws://10.255.0.35:8765
 这是当前部署默认值，不是永久协议。可按部署覆盖：
 
 ```bash
-python3 -m audio_module.main stream-test --url ws://<algorithm-ip>:8765 ...
+python3 -m runtime.main stream-test --url ws://<algorithm-ip>:8765 ...
 # 或
 export AUDIO_MODULE_WS_URL=ws://<algorithm-ip>:8765
 ```
@@ -137,7 +137,7 @@ cd ~/projects/Project-Neck/modules/audio
 ### 固定格式检查（纯软件安全）
 
 ```bash
-python3 -m audio_module.main check-config
+python3 -m runtime.main check-config
 ```
 
 预期输出确认 16000 Hz、mono、int16、20 ms、320 samples、640 bytes/frame。
@@ -145,7 +145,7 @@ python3 -m audio_module.main check-config
 ### 麦克风采集（连接真实麦克风，不连接网络/Motor）
 
 ```bash
-python3 -m audio_module.main capture-test --duration 5 --output capture.wav
+python3 -m runtime.main capture-test --duration 5 --output capture.wav
 ```
 
 输出 WAV 应为 16 kHz、mono、16-bit。当前没有独立的 playback-only CLI；扬声器播放通过收到 robot PCM 的双向测试验证。
@@ -180,14 +180,14 @@ python3 tools/pcm_ws_server.py \
 
 ```bash
 cd ~/projects/Project-Neck/modules/audio
-python3 -m audio_module.main stream-test \
+python3 -m runtime.main stream-test \
   --duration 5 --url ws://<server-ip>:8765
 ```
 
 等待并播放验证 server 返回的 robot audio：
 
 ```bash
-python3 -m audio_module.main stream-test \
+python3 -m runtime.main stream-test \
   --duration 5 --url ws://<server-ip>:8765 --wait-for-robot
 ```
 
@@ -239,7 +239,7 @@ cd ~/projects/Project-Neck/modules/algorithm
 
 ```bash
 cd ~/projects/Project-Neck/modules/audio
-python3 -m audio_module.main duplex-test \
+python3 -m runtime.main duplex-test \
   --turns 2 --duration 5 --url ws://<algorithm-ip>:8765
 ```
 
@@ -254,7 +254,7 @@ python3 -m audio_module.main duplex-test \
 Algorithm 同时生成完整 Neck RPY，但 mock 模式只校验/打印，不驱动 Motor。`duplex-test` 要求至少两轮并复用同一 WebSocket；单轮可用：
 
 ```bash
-python3 -m audio_module.main stream-test \
+python3 -m runtime.main stream-test \
   --duration 5 --url ws://<algorithm-ip>:8765 --wait-for-robot
 ```
 
@@ -344,14 +344,14 @@ cd ~/projects/Project-Neck/modules/algorithm
 
 ```bash
 cd ~/projects/Project-Neck/modules/audio
-python3 -m audio_module.main duplex-test \
+python3 -m runtime.main duplex-test \
   --turns 2 --duration 5 --url ws://<algorithm-ip>:8765
 ```
 
 若只测试一轮：
 
 ```bash
-python3 -m audio_module.main stream-test \
+python3 -m runtime.main stream-test \
   --duration 5 --url ws://<algorithm-ip>:8765 --wait-for-robot
 ```
 
@@ -486,8 +486,8 @@ cd ~/projects/Project-Neck/modules/algorithm
 
 ```bash
 cd ~/projects/Project-Neck/modules/audio
-python3 -m audio_module.main check-config
-python3 -m audio_module.main capture-test --duration 5 --output capture.wav
+python3 -m runtime.main check-config
+python3 -m runtime.main capture-test --duration 5 --output capture.wav
 ```
 
 ### B. 测试完整语音闭环，不动电机
@@ -499,7 +499,7 @@ cd ~/projects/Project-Neck/modules/algorithm
 
 # Audio Computer
 cd ~/projects/Project-Neck/modules/audio
-python3 -m audio_module.main duplex-test \
+python3 -m runtime.main duplex-test \
   --turns 2 --duration 5 --url ws://<algorithm-ip>:8765
 ```
 

@@ -75,7 +75,7 @@ Motor 不得处理 ASR、TTS、文本、Dialogue 或模型推理。`states` 仅�
 ### 角色与部署参数
 
 - **Algorithm 是 WebSocket server**：`modules/algorithm/algorithm_runtime/audio_server.py`，默认 bind `0.0.0.0:8765`，可由 `python -m algorithm_runtime --host/--port` 配置。
-- **Audio 是 WebSocket client**：默认 URL 在 `modules/audio/audio_module/config.py`，当前为 `ws://10.255.0.35:8765`；可用 CLI `--url` 或环境变量 `AUDIO_MODULE_WS_URL` 覆盖。
+- **Audio 是 WebSocket client**：默认 URL 在 `modules/audio/runtime/config.py`，当前为 `ws://10.255.0.35:8765`；可用 CLI `--url` 或环境变量 `AUDIO_MODULE_WS_URL` 覆盖。
 - IP、bind host、port 是部署时可配置参数；帧格式和消息语义是固定协议。
 
 ### 固定 PCM
@@ -105,7 +105,7 @@ Robot Audio 反向使用相同协议，`source` 必须为 `robot`，通常使用
 - Audio capture/playback Queue 各最多 250 帧（5 s）；capture callback 满时丢帧并计数，playback Queue 满时报错；播放预缓冲 5 帧（100 ms）。
 - Algorithm 将完整 user stream 保存在内存中，收到 `stream_end` 后才 ASR/推理；上限 5 分钟 PCM。当前没有流式 ASR、VAD、自动 endpoint、重连或断点续传。
 - 非 640-byte Binary Frame、格式/来源/stream_id 错误会关闭连接；Algorithm 使用 WebSocket close code 1011，Audio 测试 server 的协议错误使用 1008。
-- 修改协议、buffer、超时或异常策略时必须同时检查 `modules/audio/audio_module/{protocol.py,websocket_client.py,audio_capture.py,audio_playback.py}`、`modules/algorithm/algorithm_runtime/audio_server.py`、`tts.py` 和 `modules/audio/tools/pcm_ws_server.py`。
+- 修改协议、buffer、超时或异常策略时必须同时检查 `modules/audio/runtime/{protocol.py,websocket_client.py,audio_capture.py,audio_playback.py}`、`modules/algorithm/algorithm_runtime/audio_server.py`、`tts.py` 和 `modules/audio/tools/pcm_ws_server.py`。
 
 ## 4. 冻结接口：Algorithm → Motor
 
@@ -159,13 +159,13 @@ Algorithm 是 client，Motor 是 server。每次连接发送**一个完整 UTF-8
 
 ```bash
 cd modules/audio
-python3 -m audio_module.main check-config
-python3 -m audio_module.main capture-test --duration 5 --output capture.wav
-python3 -m audio_module.main stream-test --duration 5 --wait-for-robot
-python3 -m audio_module.main duplex-test --turns 2 --duration 5
+python3 -m runtime.main check-config
+python3 -m runtime.main capture-test --duration 5 --output capture.wav
+python3 -m runtime.main stream-test --duration 5 --wait-for-robot
+python3 -m runtime.main duplex-test --turns 2 --duration 5
 ```
 
-主 CLI：`modules/audio/audio_module/main.py`。WebSocket 验证 server：
+主 CLI：`modules/audio/runtime/main.py`。WebSocket 验证 server：
 
 ```bash
 python3 tools/pcm_ws_server.py --host 0.0.0.0 --port 8765 --save-dir received_audio

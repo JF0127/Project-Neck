@@ -27,8 +27,8 @@ permission to the terminal or Python host when macOS requests it.
 ## Local microphone validation
 
 ```bash
-python3 -m audio_module.main check-config
-python3 -m audio_module.main capture-test --duration 5 --output capture.wav
+python3 -m runtime.main check-config
+python3 -m runtime.main capture-test --duration 5 --output capture.wav
 ```
 
 The second command saves a mono 16-bit/16 kHz WAV file. `--output` defaults to
@@ -60,13 +60,13 @@ The WAV must already be uncompressed 16 kHz, mono, 16-bit PCM. The server sends 
 On the Mac, stream the microphone for five seconds without waiting for a reply:
 
 ```bash
-python3 -m audio_module.main stream-test --duration 5
+python3 -m runtime.main stream-test --duration 5
 ```
 
 For the bidirectional playback test, use:
 
 ```bash
-python3 -m audio_module.main stream-test --duration 5 --wait-for-robot
+python3 -m runtime.main stream-test --duration 5 --wait-for-robot
 ```
 
 The client prebuffers five robot frames (100 ms), then plays through a bounded Queue and
@@ -75,20 +75,20 @@ prints received/played frame counts, underruns, callback statuses, and maximum Q
 To run two complete user-to-robot turns while reusing one WebSocket connection:
 
 ```bash
-python3 -m audio_module.main duplex-test
+python3 -m runtime.main duplex-test
 ```
 
 Defaults are two turns, five microphone seconds per turn, and a 30-second robot timeout.
 They can be adjusted without changing the audio protocol:
 
 ```bash
-python3 -m audio_module.main duplex-test --turns 2 --duration 5 --robot-timeout 30
+python3 -m runtime.main duplex-test --turns 2 --duration 5 --robot-timeout 30
 ```
 
 The default endpoint is `ws://10.255.0.35:8765`. Override it when testing locally:
 
 ```bash
-python3 -m audio_module.main stream-test --duration 5 --url ws://127.0.0.1:8765 --wait-for-robot
+python3 -m runtime.main stream-test --duration 5 --url ws://127.0.0.1:8765 --wait-for-robot
 ```
 
 It can also be changed with `AUDIO_MODULE_WS_URL`. Press Ctrl+C to stop early; the client
