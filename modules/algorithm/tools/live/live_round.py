@@ -17,7 +17,7 @@
 
 手动执行流程(实机):
     1. 脚本提示后, 在 Motor 终端(需要 root):
-         cd Project-Motor && sudo ./build/master_stack_test
+         cd modules/motor && sudo ./build/master_stack_test
          > NeckTrajDryRun <workdir>/trajectory_1.json     # 预检
          > NeckTrajRun    <workdir>/trajectory_1.json 0 <audit_dir>
     2. 回到本脚本按回车 → 自动播放机器人语音
@@ -34,13 +34,14 @@ from pathlib import Path
 
 # 项目根(与 mvp.py 相同约定)
 NET_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = NET_ROOT.parents[1]
 sys.path.insert(0, str(NET_ROOT))
 
 from tools.live.tts_align import tts_align, DEFAULT_VOICE, BOT_VOICE  # noqa: E402
 
-DEFAULT_WORKDIR = NET_ROOT.parent / "neck_l1"  # 生成物目录: Project-Neck/neck_l1 (已被 .gitignore 忽略)
+DEFAULT_WORKDIR = PROJECT_ROOT / "neck_l1"  # 生成物目录: Project-Neck/neck_l1 (已被 .gitignore 忽略)
 DEFAULT_CHECKPOINT = NET_ROOT / "outputs/neck_motion_v3/checkpoints/best.pt"
-DEFAULT_WHISPER = NET_ROOT.parent / "model"  # 本地 faster-whisper base (Project-Neck/model)
+DEFAULT_WHISPER = PROJECT_ROOT / "model"  # 本地 faster-whisper base (Project-Neck/model)
 
 # 预置回复表(英文, 与训练数据语言一致; 后续可换规则/LLM)
 REPLIES = [

@@ -13,7 +13,7 @@ from .runtime import AlgorithmRuntime
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CHECKPOINT = PROJECT_ROOT / "outputs/neck_motion_v3/checkpoints/best.pt"
-DEFAULT_WHISPER = PROJECT_ROOT.parent / "model"
+DEFAULT_WHISPER = PROJECT_ROOT.parents[1] / "model"
 
 
 def parse_args() -> argparse.Namespace:

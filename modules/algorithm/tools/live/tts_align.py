@@ -154,12 +154,12 @@ def main() -> None:
                     help="输出目录(默认 Project-Neck/neck_l1)")
     ap.add_argument("--voice", default=DEFAULT_VOICE, help="edge-tts 音色")
     ap.add_argument("--language", default="en", help="whisper 语言(数据集为英文, 默认 en)")
-    ap.add_argument("--whisper-model", default=str(Path(__file__).resolve().parents[3] / "model"),
+    ap.add_argument("--whisper-model", default=str(Path(__file__).resolve().parents[4] / "model"),
                     help="whisper 模型路径(默认本地 Project-Neck/model; 传尺寸名会从 HF 下载)")
     ap.add_argument("--device", default=None, help="cuda/cpu, 默认自动")
     args = ap.parse_args()
 
-    out_dir = args.out_dir or str(Path(__file__).resolve().parents[3] / "neck_l1")
+    out_dir = args.out_dir or str(Path(__file__).resolve().parents[4] / "neck_l1")
     res = tts_align(args.text, args.name, out_dir, args.voice,
                     args.language, args.whisper_model, args.device)
     for w in res["words"]:

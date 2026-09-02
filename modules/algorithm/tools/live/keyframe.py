@@ -36,7 +36,7 @@ DEG2RAD = np.pi / 180.0
 STATE_ID = {"silent": 0, "speaking": 1, "listening": 2}
 STATE_NAME = {0: "silent", 1: "speaking", 2: "listening"}
 
-# 执行层安全限速(与 Project-Motor/neck_control/neck_trajectory_config.txt 保持一致;
+# 执行层安全限速(与 modules/motor/neck_control/neck_trajectory_config.txt 保持一致;
 # keyframe.py 会尝试从该配置文件读取, 读不到用此默认值)
 DEFAULT_LIMITS = {
     "vmax_deg_s": [25.0, 25.0, 30.0],

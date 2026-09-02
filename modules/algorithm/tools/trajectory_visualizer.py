@@ -277,7 +277,7 @@ def find_project_root() -> Path:
     """Locate Project-Neck from this script, without depending on the caller cwd."""
     script = Path(__file__).resolve()
     for candidate in script.parents:
-        if (candidate / "Project-Net").is_dir() and (candidate / "Project-Motor").is_dir():
+        if (candidate / "modules/algorithm").is_dir() and (candidate / "modules/motor").is_dir():
             return candidate
     raise RuntimeError("cannot locate Project-Neck root from trajectory_visualizer.py")
 
@@ -529,8 +529,8 @@ def main() -> None:
     run_dir, run_id, run_created = resolve_run(runs_dir, args.run, timestamp_value)
     segment_dir, segment_id, segment_index = create_segment(run_dir, role)
 
-    net_commit = git_commit(project_root / "Project-Net")
-    motor_commit = git_commit(project_root / "Project-Motor")
+    net_commit = git_commit(project_root / "modules/algorithm")
+    motor_commit = git_commit(project_root / "modules/motor")
     checkpoint = args.checkpoint or explicit_checkpoint(document)
     fps = float(document["fps"])
     run_config_path = run_dir / "run_config.json"

@@ -2,15 +2,17 @@
 
 Project-Neck 是机器头语音交互、颈部动作生成和三电机执行的统一工程。本文只说明**当前代码真实可用**的启动入口、测试顺序和安全边界；旧 `tools/live/` L1 路径不是当前正式链路。
 
-> **硬件警告：**`Project-Motor/build/master_stack_test` 没有 mock/no-EtherCAT 模式。运行它会初始化真实 EtherCAT；向其 `/tmp/neck_model.sock` 发送合法轨迹可能立即驱动机器头。首次测试必须先走纯软件链路。
+> **硬件警告：**`modules/motor/build/master_stack_test` 没有 mock/no-EtherCAT 模式。运行它会初始化真实 EtherCAT；向其 `/tmp/neck_model.sock` 发送合法轨迹可能立即驱动机器头。首次测试必须先走纯软件链路。
 
 ## 1. 项目结构
 
 ```text
 Project-Neck/
-├── Project-Audio/   # 麦克风、扬声器、PCM WebSocket
-├── Project-Net/     # Algorithm Runtime、ASR、Dialogue、TTS、Neck Motion
-├── Project-Motor/   # trajectory parser、IK、电机轨迹、EtherCAT/CAN
+├── modules/
+│   ├── audio/       # 麦克风、扬声器、PCM WebSocket
+│   ├── algorithm/   # Algorithm Runtime、ASR、Dialogue、TTS、Neck Motion
+│   └── motor/       # trajectory parser、IK、电机轨迹、EtherCAT/CAN
+├── model/           # faster-whisper 模型
 ├── experiments/     # 旁路实验记录
 ├── AGENTS.md        # 全项目开发与安全约束
 └── README.md        # 本运行手册
@@ -18,25 +20,25 @@ Project-Neck/
 
 | 模块 | 当前职责 |
 |---|---|
-| `Project-Audio` | 麦克风采集、扬声器播放、有界 Audio Queue、16 kHz PCM WebSocket 收发 |
-| `Project-Net` | Algorithm Runtime、整段 ASR、fixed/echo Dialogue、TTS、listener/speaker motion generation、最终 RPY trajectory |
-| `Project-Motor` | 扁平 trajectory JSON parser、radian→degree、IK、位置/速度 precheck、三电机轨迹执行、EtherCAT/CAN |
+| `modules/audio` | 麦克风采集、扬声器播放、有界 Audio Queue、16 kHz PCM WebSocket 收发 |
+| `modules/algorithm` | Algorithm Runtime、整段 ASR、fixed/echo Dialogue、TTS、listener/speaker motion generation、最终 RPY trajectory |
+| `modules/motor` | 扁平 trajectory JSON parser、radian→degree、IK、位置/速度 precheck、三电机轨迹执行、EtherCAT/CAN |
 
 ## 2. 当前整体链路
 
 ```text
 Microphone
    ↓
-Project-Audio
+modules/audio
    ↓ WebSocket：JSON control + Binary PCM
-Project-Net / Algorithm Runtime
-   ├──→ TTS PCM → WebSocket → Project-Audio → Speaker
+modules/algorithm / Algorithm Runtime
+   ├──→ TTS PCM → WebSocket → modules/audio → Speaker
    │
    └──→ final 30 fps RPY trajectory
               ↓
          /tmp/neck_model.sock
               ↓
-         Project-Motor
+         modules/motor
               ↓
          parser / IK / Motors
 ```
@@ -68,10 +70,10 @@ Algorithm → Motor 的正式 JSON 固定为 30 fps、radian、`[roll,pitch,yaw]
 
 ### Audio Computer
 
-当前 `Project-Audio` 面向 macOS：
+当前 `modules/audio` 面向 macOS：
 
 ```bash
-cd ~/projects/Project-Neck/Project-Audio
+cd ~/projects/Project-Neck/modules/audio
 python3 -m venv .venv
 source .venv/bin/activate
 python3 -m pip install -r requirements.txt
@@ -99,18 +101,18 @@ export AUDIO_MODULE_WS_URL=ws://<algorithm-ip>:8765
 
 - Algorithm 默认 bind：`0.0.0.0:8765`
 - Motor Socket：`/tmp/neck_model.sock`
-- `Project-Net/.venv` 当前文档环境为 Python 3.10
+- `modules/algorithm/.venv` 当前文档环境为 Python 3.10
 - Motor 文档环境为 Ubuntu 20.04、CMake、C++17、Boost、Readline，SOEM 位于仓库 third-party
 
 Algorithm Runtime 还需要环境中存在：
 
-- v3 candidates checkpoint，默认：`Project-Net/outputs/neck_motion_v3/checkpoints/best.pt`
+- v3 candidates checkpoint，默认：`modules/algorithm/outputs/neck_motion_v3/checkpoints/best.pt`
 - checkpoint 对应词表（由 checkpoint 的 `vocab_path` 指定）
 - faster-whisper 模型，默认：`Project-Neck/model/`
 - torch、numpy、scipy、soundfile、faster-whisper、edge-tts 等依赖
 - edge-tts 可访问的网络
 
-当前仓库忽略 `Project-Net/outputs/` 和 `Project-Neck/model/`，干净 checkout 不包含这些部署资产。`requirements-runtime.txt` 目前也只补充 WebSocket 依赖，不能作为完整环境安装清单。
+当前仓库忽略 `modules/algorithm/outputs/` 和 `Project-Neck/model/`，干净 checkout 不包含这些部署资产。`requirements-runtime.txt` 目前也只补充 WebSocket 依赖，不能作为完整环境安装清单。
 
 Motor 当前 `main.cpp` 实际硬编码 EtherCAT 网卡为 `enp4s0`；`neck/neck_config.py` 中的 `network_interface` 尚未被入口读取。部署到其他主机时必须核对源码、网卡和重新编译，不能只改配置后假设生效。
 
@@ -129,7 +131,7 @@ Level 5  Audio + Algorithm + Motor 完整实机链路
 ## 5. Level 1 — Audio 单模块
 
 ```bash
-cd ~/projects/Project-Neck/Project-Audio
+cd ~/projects/Project-Neck/modules/audio
 ```
 
 ### 固定格式检查（纯软件安全）
@@ -157,7 +159,7 @@ python3 -m audio_module.main capture-test --duration 5 --output capture.wav
 接收用户 PCM：
 
 ```bash
-cd ~/projects/Project-Neck/Project-Audio
+cd ~/projects/Project-Neck/modules/audio
 python3 tools/pcm_ws_server.py --host 0.0.0.0 --port 8765 --save-dir received_audio
 ```
 
@@ -177,7 +179,7 @@ python3 tools/pcm_ws_server.py \
 只上传麦克风：
 
 ```bash
-cd ~/projects/Project-Neck/Project-Audio
+cd ~/projects/Project-Neck/modules/audio
 python3 -m audio_module.main stream-test \
   --duration 5 --url ws://<server-ip>:8765
 ```
@@ -196,7 +198,7 @@ python3 -m audio_module.main stream-test \
 ### 启动 Algorithm
 
 ```bash
-cd ~/projects/Project-Neck/Project-Net
+cd ~/projects/Project-Neck/modules/algorithm
 .venv/bin/python -m algorithm_runtime --mock-neck
 ```
 
@@ -229,14 +231,14 @@ cd ~/projects/Project-Neck/Project-Net
 **Terminal A — Algorithm Computer**
 
 ```bash
-cd ~/projects/Project-Neck/Project-Net
+cd ~/projects/Project-Neck/modules/algorithm
 .venv/bin/python -m algorithm_runtime --mock-neck
 ```
 
 **Terminal B — Audio Computer**
 
 ```bash
-cd ~/projects/Project-Neck/Project-Audio
+cd ~/projects/Project-Neck/modules/audio
 python3 -m audio_module.main duplex-test \
   --turns 2 --duration 5 --url ws://<algorithm-ip>:8765
 ```
@@ -261,7 +263,7 @@ python3 -m audio_module.main stream-test \
 ### 不使用麦克风的 Runtime 记录回归测试（纯软件安全）
 
 ```bash
-cd ~/projects/Project-Neck/Project-Net
+cd ~/projects/Project-Neck/modules/algorithm
 .venv/bin/python -m unittest tests.test_experiment_logging -v
 ```
 
@@ -272,7 +274,7 @@ cd ~/projects/Project-Neck/Project-Net
 ### 编译（纯软件安全，不启动电机）
 
 ```bash
-cd ~/projects/Project-Neck/Project-Motor
+cd ~/projects/Project-Neck/modules/motor
 cmake -S . -B build
 cmake --build build
 ```
@@ -282,7 +284,7 @@ cmake --build build
 ### 真实 Motor 入口（危险）
 
 ```bash
-cd ~/projects/Project-Neck/Project-Motor
+cd ~/projects/Project-Neck/modules/motor
 sudo ./build/master_stack_test
 ```
 
@@ -297,7 +299,7 @@ Motor 是 `/tmp/neck_model.sock` server，Algorithm 和发送工具是 client。
 当前发送工具：
 
 ```bash
-cd ~/projects/Project-Neck/Project-Motor
+cd ~/projects/Project-Neck/modules/motor
 python3 tools/model_socket_client.py <trajectory.json> \
   --socket /tmp/neck_model.sock
 ```
@@ -306,7 +308,7 @@ python3 tools/model_socket_client.py <trajectory.json> \
 
 ### 协议验证与真实执行的区别
 
-- `Project-Net -m algorithm_runtime --mock-neck`：只在 Algorithm 侧验证最终 JSON，不连接 Motor，安全。
+- `modules/algorithm -m algorithm_runtime --mock-neck`：只在 Algorithm 侧验证最终 JSON，不连接 Motor，安全。
 - `cmake --build build`：只编译，安全。
 - `tools/model_socket_client.py` 连接真实 Motor：可能执行硬件，不是纯协议检查。
 - 当前 Motor 没有独立 parser-only CLI、`--no-ethercat` 或 dry-run server。
@@ -319,7 +321,7 @@ python3 tools/model_socket_client.py <trajectory.json> \
 ### Step 1 — Algorithm/Motor Ubuntu 主机：启动 Motor
 
 ```bash
-cd ~/projects/Project-Neck/Project-Motor
+cd ~/projects/Project-Neck/modules/motor
 sudo ./build/master_stack_test
 ```
 
@@ -332,7 +334,7 @@ sudo ./build/master_stack_test
 ### Step 2 — 同一 Ubuntu 主机另一个终端：启动 Algorithm
 
 ```bash
-cd ~/projects/Project-Neck/Project-Net
+cd ~/projects/Project-Neck/modules/algorithm
 .venv/bin/python -m algorithm_runtime
 ```
 
@@ -341,7 +343,7 @@ cd ~/projects/Project-Neck/Project-Net
 ### Step 3 — Audio Computer：启动有限多轮测试
 
 ```bash
-cd ~/projects/Project-Neck/Project-Audio
+cd ~/projects/Project-Neck/modules/audio
 python3 -m audio_module.main duplex-test \
   --turns 2 --duration 5 --url ws://<algorithm-ip>:8765
 ```
@@ -357,11 +359,11 @@ python3 -m audio_module.main stream-test \
 
 ```text
 User voice
-→ Project-Audio microphone
+→ modules/audio microphone
 → WebSocket PCM
-→ Project-Net ASR → Dialogue → TTS
+→ modules/algorithm ASR → Dialogue → TTS
 → robot PCM → WebSocket
-→ Project-Audio speaker
+→ modules/audio speaker
 ```
 
 同时：
@@ -372,7 +374,7 @@ User PCM / robot PCM + word timestamps
 → composition / blend / silent return
 → final 30 fps RPY
 → /tmp/neck_model.sock
-→ Project-Motor parser / precheck / IK
+→ modules/motor parser / precheck / IK
 → Motors
 ```
 
@@ -454,14 +456,14 @@ Session
 工具位置：
 
 ```bash
-cd ~/projects/Project-Neck/Project-Net
+cd ~/projects/Project-Neck/modules/algorithm
 ```
 
 分析某次独立 listener generation：
 
 ```bash
 .venv/bin/python tools/trajectory_visualizer.py \
-  ../experiments/v0_trajectory/sessions/<session-id>/turns/turn_001/model_generations/generation_001_listener.json \
+  ../../experiments/v0_trajectory/sessions/<session-id>/turns/turn_001/model_generations/generation_001_listener.json \
   --role listener
 ```
 
@@ -469,7 +471,7 @@ cd ~/projects/Project-Neck/Project-Net
 
 ```bash
 .venv/bin/python tools/trajectory_visualizer.py \
-  ../experiments/v0_trajectory/sessions/<session-id>/turns/turn_001/neck_rpy.json \
+  ../../experiments/v0_trajectory/sessions/<session-id>/turns/turn_001/neck_rpy.json \
   --role speaker \
   --notes "full mixed-state turn; role is only the legacy output-directory label"
 ```
@@ -483,7 +485,7 @@ cd ~/projects/Project-Neck/Project-Net
 ### A. 只测试 Audio
 
 ```bash
-cd ~/projects/Project-Neck/Project-Audio
+cd ~/projects/Project-Neck/modules/audio
 python3 -m audio_module.main check-config
 python3 -m audio_module.main capture-test --duration 5 --output capture.wav
 ```
@@ -492,11 +494,11 @@ python3 -m audio_module.main capture-test --duration 5 --output capture.wav
 
 ```bash
 # Algorithm Computer
-cd ~/projects/Project-Neck/Project-Net
+cd ~/projects/Project-Neck/modules/algorithm
 .venv/bin/python -m algorithm_runtime --mock-neck
 
 # Audio Computer
-cd ~/projects/Project-Neck/Project-Audio
+cd ~/projects/Project-Neck/modules/audio
 python3 -m audio_module.main duplex-test \
   --turns 2 --duration 5 --url ws://<algorithm-ip>:8765
 ```
@@ -514,9 +516,9 @@ python3 -m audio_module.main duplex-test \
 ### D. 完整实机系统
 
 ```text
-1. Project-Motor：sudo ./build/master_stack_test
-2. Project-Net：.venv/bin/python -m algorithm_runtime
-3. Project-Audio：duplex-test 或单轮 stream-test --wait-for-robot
+1. modules/motor：sudo ./build/master_stack_test
+2. modules/algorithm：.venv/bin/python -m algorithm_runtime
+3. modules/audio：duplex-test 或单轮 stream-test --wait-for-robot
 ```
 
 ## 15. 安全与常见定位
@@ -540,7 +542,7 @@ python3 -m audio_module.main duplex-test \
 | robot audio 超时 | ASR/TTS 异常、edge-tts 网络、Runtime ERROR 日志、Audio `--robot-timeout` |
 | `/tmp/neck_model.sock` 不存在 | Motor 未成功启动、EtherCAT 初始化/从站失败、Socket 权限 |
 | client 正常退出但 Motor 不动 | Socket 无 ACK；检查 Motor parser、precheck、busy、IK 和速度超限日志 |
-| Motor 找不到配置 | 从 `Project-Motor` 根目录启动；当前只查找 `neck/neck_config.py` 或 `../neck/neck_config.py` |
+| Motor 找不到配置 | 从 `modules/motor` 根目录启动；当前只查找 `neck/neck_config.py` 或 `../neck/neck_config.py` |
 | Motor 找不到网卡/从站 | `main.cpp` 当前硬编码 `enp4s0`；核对实际网卡、接线、权限并重新编译 |
 | trajectory 被拒绝 | 检查 finite number、30 fps/radian/order、RPY/电机范围和相邻帧电机速度 |
 

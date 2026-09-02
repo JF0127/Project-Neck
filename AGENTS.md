@@ -8,10 +8,10 @@ Project-Neck 是一个**高拟人多模态交互机器人头部系统**。核心
 
 ```text
 用户语音
-  → Project-Audio 采集并发送 PCM
-  → Project-Net 完成识别、回复、TTS、状态调度和 Neck Motion
-  → 机器人回复 PCM → Project-Audio → Speaker
-  → RPY trajectory → Project-Motor → IK → Motors
+  → modules/audio 采集并发送 PCM
+  → modules/algorithm 完成识别、回复、TTS、状态调度和 Neck Motion
+  → 机器人回复 PCM → modules/audio → Speaker
+  → RPY trajectory → modules/motor → IK → Motors
 ```
 
 当前处于 **v0 系统集成与优化阶段**。整体双向音频链路、Algorithm → Motor Socket 和基础 Motor/IK/EtherCAT 框架已在代码中接通；当前首要问题是模型 RPY 轨迹抖动、速度/加速度过大，Motor 只能拒绝不满足速度限制的轨迹，尚无正式的硬件可执行性 `TrajectoryPostprocessor`。
@@ -20,7 +20,7 @@ v0 优先保证可运行、可定位、可视化、可调试和模块边界清�
 
 ## 2. 模块结构与边界
 
-### `Project-Audio`：声音 I/O 与传输
+### `modules/audio`：声音 I/O 与传输
 
 只负责：
 
@@ -32,7 +32,7 @@ v0 优先保证可运行、可定位、可视化、可调试和模块边界清�
 
 > Audio 只负责声音输入、声音输出和传输。
 
-### `Project-Net`：算法与系统 Runtime
+### `modules/algorithm`：算法与系统 Runtime
 
 负责：
 
@@ -45,11 +45,11 @@ v0 优先保证可运行、可定位、可视化、可调试和模块边界清�
 
 当前动作实现是 `models/neck_motion/candidates.py` 的 `MultiCandidateModel`，由 `ConditionEncoder`（audio log-Mel、word timestamps/text、previous text context、role）+ 片段级 K 个 latent candidates + Transformer `SequenceDecoder` + speaker/listener heads 组成。Runtime 要求 checkpoint 内 `config.model.type == "candidates"`，在线按候选能量选择 listener/speaker 轨迹，再做四段 composition：listener → thinking silent → speaker → silent return。
 
-**部署资产现状：**代码默认 checkpoint 为 `Project-Net/outputs/neck_motion_v3/checkpoints/best.pt`，文档称其为 v3、K=8；但 `outputs/` 被忽略且当前工作树中没有该 checkpoint、词表或默认 Whisper 目录 `Project-Neck/model/`。因此目前只能确认代码要求和默认路径，不能从本仓库验证实际部署 checkpoint 的内部配置。不要用 `models/neck_motion/config.yaml` 的 `model.type: regression` 推断线上模型；部署时必须检查实际 checkpoint 的 `config`、`vocab_path` 和权重。
+**部署资产现状：**代码默认 checkpoint 为 `modules/algorithm/outputs/neck_motion_v3/checkpoints/best.pt`，文档称其为 v3、K=8；但 `outputs/` 被忽略且当前工作树中没有该 checkpoint、词表或默认 Whisper 目录 `Project-Neck/model/`。因此目前只能确认代码要求和默认路径，不能从本仓库验证实际部署 checkpoint 的内部配置。不要用 `models/neck_motion/config.yaml` 的 `model.type: regression` 推断线上模型；部署时必须检查实际 checkpoint 的 `config`、`vocab_path` 和权重。
 
 Algorithm 不得知道 MotorId、电机中位/零点、EtherCAT、CAN、IK 内部公式或厂家参数。
 
-### `Project-Motor`：颈部执行与硬件
+### `modules/motor`：颈部执行与硬件
 
 负责：
 
@@ -74,8 +74,8 @@ Motor 不得处理 ASR、TTS、文本、Dialogue 或模型推理。`states` 仅�
 
 ### 角色与部署参数
 
-- **Algorithm 是 WebSocket server**：`Project-Net/algorithm_runtime/audio_server.py`，默认 bind `0.0.0.0:8765`，可由 `python -m algorithm_runtime --host/--port` 配置。
-- **Audio 是 WebSocket client**：默认 URL 在 `Project-Audio/audio_module/config.py`，当前为 `ws://10.255.0.35:8765`；可用 CLI `--url` 或环境变量 `AUDIO_MODULE_WS_URL` 覆盖。
+- **Algorithm 是 WebSocket server**：`modules/algorithm/algorithm_runtime/audio_server.py`，默认 bind `0.0.0.0:8765`，可由 `python -m algorithm_runtime --host/--port` 配置。
+- **Audio 是 WebSocket client**：默认 URL 在 `modules/audio/audio_module/config.py`，当前为 `ws://10.255.0.35:8765`；可用 CLI `--url` 或环境变量 `AUDIO_MODULE_WS_URL` 覆盖。
 - IP、bind host、port 是部署时可配置参数；帧格式和消息语义是固定协议。
 
 ### 固定 PCM
@@ -105,7 +105,7 @@ Robot Audio 反向使用相同协议，`source` 必须为 `robot`，通常使用
 - Audio capture/playback Queue 各最多 250 帧（5 s）；capture callback 满时丢帧并计数，playback Queue 满时报错；播放预缓冲 5 帧（100 ms）。
 - Algorithm 将完整 user stream 保存在内存中，收到 `stream_end` 后才 ASR/推理；上限 5 分钟 PCM。当前没有流式 ASR、VAD、自动 endpoint、重连或断点续传。
 - 非 640-byte Binary Frame、格式/来源/stream_id 错误会关闭连接；Algorithm 使用 WebSocket close code 1011，Audio 测试 server 的协议错误使用 1008。
-- 修改协议、buffer、超时或异常策略时必须同时检查 `Project-Audio/audio_module/{protocol.py,websocket_client.py,audio_capture.py,audio_playback.py}`、`Project-Net/algorithm_runtime/audio_server.py`、`tts.py` 和 `Project-Audio/tools/pcm_ws_server.py`。
+- 修改协议、buffer、超时或异常策略时必须同时检查 `modules/audio/audio_module/{protocol.py,websocket_client.py,audio_capture.py,audio_playback.py}`、`modules/algorithm/algorithm_runtime/audio_server.py`、`tts.py` 和 `modules/audio/tools/pcm_ws_server.py`。
 
 ## 4. 冻结接口：Algorithm → Motor
 
@@ -144,9 +144,9 @@ Algorithm 是 client，Motor 是 server。每次连接发送**一个完整 UTF-8
 
 修改该接口时默认先停止并征得明确许可；确需修改时必须同时检查：
 
-1. `Project-Net/algorithm_runtime/{motion.py,neck_client.py}`；
-2. `Project-Motor/neck/{model_socket.cpp,trajectory_io.cpp,trajectory.h}`；
-3. `Project-Motor/tools/model_socket_client.py`、本地 trajectory JSON 和 `Project-Net/tools/trajectory_visualizer.py`；
+1. `modules/algorithm/algorithm_runtime/{motion.py,neck_client.py}`；
+2. `modules/motor/neck/{model_socket.cpp,trajectory_io.cpp,trajectory.h}`；
+3. `modules/motor/tools/model_socket_client.py`、本地 trajectory JSON 和 `modules/algorithm/tools/trajectory_visualizer.py`；
 4. 双方 README/HANDOFF 与本文件。
 
 不要把旧 `mvp.py --export-json` 的嵌套 V1 格式（`format_version` + `trajectory.rpy`、`units`、数字 states）直接发给当前 Motor parser；它与正式扁平 Socket schema 不兼容。
@@ -158,14 +158,14 @@ Algorithm 是 client，Motor 是 server。每次连接发送**一个完整 UTF-8
 ### Audio
 
 ```bash
-cd Project-Audio
+cd modules/audio
 python3 -m audio_module.main check-config
 python3 -m audio_module.main capture-test --duration 5 --output capture.wav
 python3 -m audio_module.main stream-test --duration 5 --wait-for-robot
 python3 -m audio_module.main duplex-test --turns 2 --duration 5
 ```
 
-主 CLI：`Project-Audio/audio_module/main.py`。WebSocket 验证 server：
+主 CLI：`modules/audio/audio_module/main.py`。WebSocket 验证 server：
 
 ```bash
 python3 tools/pcm_ws_server.py --host 0.0.0.0 --port 8765 --save-dir received_audio
@@ -176,12 +176,12 @@ python3 tools/pcm_ws_server.py --host 0.0.0.0 --port 8765 --save-dir received_au
 正式 Runtime：
 
 ```bash
-cd Project-Net
+cd modules/algorithm
 .venv/bin/python -m algorithm_runtime --mock-neck
 # 只有明确准备接 Motor 时才去掉 --mock-neck
 ```
 
-入口是 `algorithm_runtime/__main__.py`，编排在 `runtime.py`；ASR/TTS/motion 分别在 `asr.py`、`tts.py`、`motion.py`。默认 `0.0.0.0:8765`、checkpoint `outputs/neck_motion_v3/checkpoints/best.pt`、Whisper `../model`、neck socket `/tmp/neck_model.sock`，均有 CLI 配置项。
+入口是 `algorithm_runtime/__main__.py`，编排在 `runtime.py`；ASR/TTS/motion 分别在 `asr.py`、`tts.py`、`motion.py`。默认 `0.0.0.0:8765`、checkpoint `outputs/neck_motion_v3/checkpoints/best.pt`、Whisper `../../model`、neck socket `/tmp/neck_model.sock`，均有 CLI 配置项。
 
 模型入口：
 
@@ -195,7 +195,7 @@ python models/neck_motion/mvp.py --checkpoint <best.pt> --events <events.json>
 ### Motor
 
 ```bash
-cd Project-Motor
+cd modules/motor
 cmake -S . -B build
 cmake --build build
 sudo ./build/master_stack_test
@@ -214,17 +214,17 @@ python3 tools/model_socket_client.py <trajectory.json> --socket /tmp/neck_model.
 ### 轨迹可视化与实验记录
 
 ```bash
-cd Project-Net
+cd modules/algorithm
 python tools/trajectory_visualizer.py <flat_socket_schema.json> --role listener
 ```
 
 工具分析 position/velocity/acceleration，并旁路写入 `experiments/v0_trajectory/runs/`。输入若包含混合 states，必须显式给 `--role`；优先按独立 segment 保存。
 
-`Project-Net/tools/live/` 是旧 L1 路径，仍引用已删除的 `Project-Motor/neck_control/`、旧嵌套 V1 JSON、`/tmp/neck_ctl.sock` 和已不存在的 Motor 命令，不能作为当前 Runtime 或 Motor 接口依据。
+`modules/algorithm/tools/live/` 是旧 L1 路径，仍引用已删除的 `modules/motor/neck_control/`、旧嵌套 V1 JSON、`/tmp/neck_ctl.sock` 和已不存在的 Motor 命令，不能作为当前 Runtime 或 Motor 接口依据。
 
 ## 6. 修改规则
 
-1. 修改前先阅读根 `AGENTS.md`，再读相关模块的 README、AGENTS、HANDOFF 和实现；Motor 修改必须读 `Project-Motor/AGENTS.md`，但以当前代码和本文件冻结边界为准。
+1. 修改前先阅读根 `AGENTS.md`，再读相关模块的 README、AGENTS、HANDOFF 和实现；Motor 修改必须读 `modules/motor/AGENTS.md`，但以当前代码和本文件冻结边界为准。
 2. 先确认工作树状态。当前仓库可能已有其他人的未提交修改；不得回退、覆盖、格式化或“顺手修复”不属于当前任务的内容。
 3. 以当前代码行为为准；文档冲突时先记录冲突，不要为了匹配旧文档而回退新实现。
 4. 优先最小、局部、可回滚修改。不做无关重构，不增加无意义 wrapper/helper，不大量添加解释性注释，不随意移动/重命名文件。
@@ -248,15 +248,15 @@ python tools/trajectory_visualizer.py <flat_socket_schema.json> --role listener
 - **checkpoint/config：**`config.yaml` 默认是 regression；Runtime 要求 candidates，文档指定 v3 checkpoint，但 checkpoint/词表在当前仓库缺失，无法核验真实部署 metadata。
 - **Endpoint/VAD：**冻结职责把 VAD/Endpoint 放在 Algorithm；当前 Runtime `vad_filter=False` 且只以显式 `stream_end` 结束一轮，没有 VAD。
 - **模型能力：**v3 代码具备 audio/text/context/role 条件结构，但 HANDOFF 的实验结论是当前 checkpoint 主要是 speaker/listener 角色动作先验，内容/语义/节奏响应没有稳定证据。
-- **旧 L1 残留：**`Project-Net/tools/live/*` 仍依赖 `/tmp/neck_ctl.sock`、旧 nested V1 schema、旧 `neck_control` 配置和当前 Motor 不存在的命令；根 `docs/L1_*` 在当前工作树已删除。正式接口是 `/tmp/neck_model.sock` + 扁平 JSON。
+- **旧 L1 残留：**`modules/algorithm/tools/live/*` 仍依赖 `/tmp/neck_ctl.sock`、旧 nested V1 schema、旧 `neck_control` 配置和当前 Motor 不存在的命令；根 `docs/L1_*` 在当前工作树已删除。正式接口是 `/tmp/neck_model.sock` + 扁平 JSON。
 - **`mvp.py` 与正式 Socket schema：**`mvp.py --export-json` 仍输出嵌套旧格式；正式 Runtime 的 `algorithm_runtime/motion.py` 才输出 Motor 可解析的扁平格式。
-- **Motor 文档/配置：**`Project-Motor/AGENTS.md` 示例称 motor3 center 为 177°，当前 `neck/neck_config.py` 是 145°；以配置和重新确认的实机标定为准，禁止猜改。该文档还强调简化旧安全体系，不能解释为可弱化本文件的保守硬件规则。
+- **Motor 文档/配置：**`modules/motor/AGENTS.md` 示例称 motor3 center 为 177°，当前 `neck/neck_config.py` 是 145°；以配置和重新确认的实机标定为准，禁止猜改。该文档还强调简化旧安全体系，不能解释为可弱化本文件的保守硬件规则。
 - **网卡配置未统一：**`neck_config.py` 有 `network_interface`，但 `main.cpp` 仍硬编码 `enp4s0`，启动时没有从配置读取。
 - **Motor 后处理缺口：**当前 `precheckNeckTrajectory` 遇到速度超限直接拒绝，没有 raw→processed 平滑、限加速度/jerk、重采样/重定时与对比输出。这是当前 P0 工作，而不是放宽速度限制。
 - **Socket 可观测性：**Motor 不返回 ACK/错误 JSON，Algorithm 等待 EOF 后会打印“send complete”，不能知道 parser、IK 或执行提交是否成功；服务端串行接收，新轨迹在已有轨迹执行时会被拒绝。
 - **Runtime 稳定性：**整段 PCM 常驻内存、全局单 Runtime state、无自动重连/取消/打断；多 client 并发不是可靠支持场景。
 - **依赖记录不完整：**`requirements-runtime.txt` 只新增 WebSocket 依赖；Runtime 实际还依赖环境中已有的 torch/numpy/scipy/soundfile/faster-whisper/edge-tts 等，且 TTS 是在线服务。
-- **Motor README 过旧：**`Project-Motor/README.MD` 主要描述 2022 SOEM demo，未覆盖当前 Socket、trajectory parser 和 Neck Motion 行为。
+- **Motor README 过旧：**`modules/motor/README.MD` 主要描述 2022 SOEM demo，未覆盖当前 Socket、trajectory parser 和 Neck Motion 行为。
 
 ## 9. 当前开发优先级
 

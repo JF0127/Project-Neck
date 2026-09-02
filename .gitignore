@@ -1,5 +1,5 @@
 # ================= Project-Neck 根 .gitignore =================
-# 覆盖两个子项目：Project-Net(模型端) 与 Project-Motor(实机端)。
+# 覆盖两个子项目：modules/algorithm（模型端）与 modules/motor（实机端）。
 # 原则：只入库源码/配置/文档/测试，不入库数据、虚拟环境与可再生成产物。
 
 # ---------------- 通用 ----------------
@@ -14,26 +14,26 @@ __pycache__/
 *.swp
 *~
 
-# ---------------- Project-Net：虚拟环境与缓存 ----------------
-Project-Net/.venv/
-Project-Net/.pytest_cache/
+# ---------------- modules/algorithm：虚拟环境与缓存 ----------------
+modules/algorithm/.venv/
+modules/algorithm/.pytest_cache/
 
-# ---------------- Project-Net：数据集（6.3G，只读，严禁入库） ----------------
-Project-Net/data/
+# ---------------- modules/algorithm：数据集（6.3G，只读，严禁入库） ----------------
+modules/algorithm/data/
 
-# ---------------- Project-Net：训练/推理产物（1.4G，可重新生成） ----------------
+# ---------------- modules/algorithm：训练/推理产物（1.4G，可重新生成） ----------------
 # 包含各版本 checkpoint(约 65M/个)、mvp 轨迹 npy/json、审计 json 等。
 # 如需把 v3 冻结模型入库，可强制添加：
-#   git add -f Project-Net/outputs/neck_motion_v3/checkpoints/best.pt
-Project-Net/outputs/
+#   git add -f modules/algorithm/outputs/neck_motion_v3/checkpoints/best.pt
+modules/algorithm/outputs/
 
-# ---------------- Project-Motor：构建产物 ----------------
-Project-Motor/build/
+# ---------------- modules/motor：构建产物 ----------------
+modules/motor/build/
 *.o
 *.a
 
-# ---------------- Project-Motor：审计落盘（保留日志文档 logs/*.md） ----------------
-Project-Motor/logs/audit_*/
+# ---------------- modules/motor：审计落盘（保留日志文档 logs/*.md） ----------------
+modules/motor/logs/audit_*/
 
 # ---------------- whisper 模型(145MB, 可从 hf-mirror 重新下载) ----------------
 model/

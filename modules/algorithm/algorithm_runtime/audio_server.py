@@ -165,7 +165,7 @@ class AudioWebSocketServer:
                 from websockets import serve
             except ImportError as exc:
                 raise RuntimeError(
-                    "websockets is required; install requirements-runtime.txt in the Project-Net environment"
+                    "websockets is required; install requirements-runtime.txt in the modules/algorithm environment"
                 ) from exc
 
         async with serve(self.handle_connection, self.host, self.port, max_size=64 * 1024):

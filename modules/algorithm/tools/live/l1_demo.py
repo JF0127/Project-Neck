@@ -42,17 +42,18 @@ from pathlib import Path
 
 # 项目根(与 mvp.py 相同约定)
 NET_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = NET_ROOT.parents[1]
 sys.path.insert(0, str(NET_ROOT))
 
 from tools.live.keyframe import (DEG2RAD, RAD2DEG, keyframe, load_limits,  # noqa: E402
                                  export_v1)
 from tools.live.tts_align import tts_align, DEFAULT_VOICE, BOT_VOICE  # noqa: E402
 
-DEFAULT_WORKDIR = NET_ROOT.parent / "neck_l1"
+DEFAULT_WORKDIR = PROJECT_ROOT / "neck_l1"
 DEFAULT_CHECKPOINT = NET_ROOT / "outputs/neck_motion_v3/checkpoints/best.pt"
-DEFAULT_WHISPER = NET_ROOT.parent / "model"
-MOTOR_BIN = NET_ROOT.parent / "Project-Motor" / "build" / "master_stack_test"
-MOTOR_CONFIG = NET_ROOT.parent / "Project-Motor" / "neck_control" / "neck_trajectory_config.txt"
+DEFAULT_WHISPER = PROJECT_ROOT / "model"
+MOTOR_BIN = PROJECT_ROOT / "modules/motor" / "build" / "master_stack_test"
+MOTOR_CONFIG = PROJECT_ROOT / "modules/motor" / "neck_control" / "neck_trajectory_config.txt"
 SOCK_PATH = "/tmp/neck_ctl.sock"
 RESP_END = b"###END###\n"
 AUDIT_DIR = "/tmp/l1_demo_audit"
@@ -320,7 +321,7 @@ class L1Demo:
         print("[demo] 启动 Motor 服务: " + " ".join(cmd))
         log = open(self.workdir / "motor_server.log", "a", encoding="utf-8")
         try:
-            # cwd 必须是 Project-Motor: 执行层按相对路径找 neck_trajectory_config.txt
+            # cwd 必须是 modules/motor: 执行层按相对路径找 neck_trajectory_config.txt
             self.proc = subprocess.Popen(cmd, cwd=str(MOTOR_BIN.parent.parent),
                                          stdout=log, stderr=log)
         except Exception as e:
@@ -362,7 +363,7 @@ class L1Demo:
 
     @staticmethod
     def _read_neutral_motor_deg() -> list[float] | None:
-        """读 Project-Motor/neck_config.txt 的 m10/m20/m30(中位电机角)。"""
+        """读 modules/motor/neck_config.txt 的 m10/m20/m30(中位电机角)。"""
         cfg = MOTOR_BIN.parent.parent / "neck_config.txt"
         vals: dict[str, float] = {}
         try:
