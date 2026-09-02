@@ -33,6 +33,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--neck-socket", default="/tmp/neck_model.sock")
     parser.add_argument(
+        "--neck-measurement-socket", default="/tmp/neck_measurement.sock"
+    )
+    parser.add_argument(
         "--mock-neck",
         action="store_true",
         help="validate and print Neck JSON without connecting to the motor process",
@@ -79,6 +82,7 @@ def main() -> None:
             motion_device=args.motion_device,
             asr_language=None if args.language == "auto" else args.language,
             neck_socket=args.neck_socket,
+            neck_measurement_socket=args.neck_measurement_socket,
             mock_neck=args.mock_neck,
             num_candidates=args.num_candidates,
             experiment_logger=experiment_logger,

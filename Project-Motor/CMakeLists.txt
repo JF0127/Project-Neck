@@ -22,12 +22,14 @@ set(SOURCES motor_control.c
     transmit.cpp
     command.cpp
     neck/model_socket.cpp
+    neck/measured_rpy.cpp
     neck/neck_config.cpp
     neck/neck_motion.cpp
     neck/neck_kinematics.cpp
     neck/neck_sequence.cpp
     neck/trajectory.cpp
     neck/trajectory_io.cpp
+    neck/trajectory_postprocessor.cpp
 )
 LINK_LIBRARIES(m)
 add_library(motor ${SOURCES})
@@ -35,3 +37,13 @@ target_link_libraries(motor soem)
 
 add_executable(master_stack_test main.cpp)
 target_link_libraries(master_stack_test motor soem cpp-readline)
+
+enable_testing()
+add_executable(trajectory_postprocessor_test tests/trajectory_postprocessor_test.cpp)
+target_link_libraries(trajectory_postprocessor_test motor soem)
+add_test(
+    NAME trajectory_postprocessor_test
+    COMMAND trajectory_postprocessor_test
+            ${CMAKE_SOURCE_DIR}/neck/neck_config.py
+            ${CMAKE_SOURCE_DIR}/tests/fixtures/latest_turn_003.json
+)

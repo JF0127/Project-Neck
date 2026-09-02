@@ -10,6 +10,7 @@
 #define SLAVE_NUMBER 4 //可该最大从机数
 
 #include <inttypes.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include "config.h"
@@ -32,6 +33,12 @@ void startRun();
 // The real-time EtherCAT loop copies the latest active frame every cycle.
 bool NeckFramePublish(int slave_id, const EtherCAT_Msg* frame);
 void NeckFrameStop(int slave_id);
+
+// Reads the latest real position feedback already decoded by the EtherCAT loop.
+// Returns false unless all three requested motors have fresh angle feedback.
+bool NeckFeedbackRead(int slave_id, const int passages[3],
+                      const int motor_ids[3], double angles_deg[3],
+                      uint64_t sequences[3]);
 
 #ifdef __cplusplus
 };

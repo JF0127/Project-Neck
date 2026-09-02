@@ -26,6 +26,9 @@ except ImportError as exc:  # pragma: no cover - environment-specific
 import numpy as np
 
 AXES = ("roll", "pitch", "yaw")
+AXIS_COLORS = {"roll": "#1f77b4", "pitch": "#ff7f0e", "yaw": "#2ca02c"}
+SOURCE_STYLES = {"measured": "-", "predicted": "--", "processed": ":"}
+SOURCE_COLORS = {"measured": "#1f77b4", "predicted": "#d62728", "processed": "#2ca02c"}
 VALID_STATES = {"listening", "speaking", "silent"}
 STATE_COLORS = {"listening": "#d9edf7", "speaking": "#fce8b2", "silent": "#eeeeee"}
 RAD2DEG = 180.0 / math.pi
@@ -83,20 +86,22 @@ def state_segments(states: list[str] | None) -> list[tuple[int, int, str]]:
     return segments
 
 
-def shade_states(axis, states: list[str] | None, fps: float) -> None:
+def shade_states(axis, states: list[str] | None, fps: float,
+                 start_sec: float = 0.0) -> None:
     labels_seen: set[str] = set()
     for start, end, state in state_segments(states):
         label = state if state not in labels_seen else None
-        axis.axvspan(start / fps, end / fps, color=STATE_COLORS[state], alpha=0.35,
-                     linewidth=0, label=label)
+        axis.axvspan(start_sec + start / fps, start_sec + end / fps,
+                     color=STATE_COLORS[state], alpha=0.35, linewidth=0, label=label)
         labels_seen.add(state)
 
 
 def save_plot(path: Path, times: np.ndarray, values: np.ndarray, ylabel: str,
-              title: str, states: list[str] | None, fps: float) -> None:
+              title: str, states: list[str] | None, fps: float,
+              start_sec: float = 0.0) -> None:
     figure = plt.figure(figsize=(13, 6))
     axis = figure.add_axes((0.08, 0.12, 0.89, 0.80))
-    shade_states(axis, states, fps)
+    shade_states(axis, states, fps, start_sec)
     for column, name in enumerate(AXES):
         axis.plot(times, values[:, column], label=name, linewidth=1.2)
     axis.set_xlabel("time (s)")
@@ -106,6 +111,82 @@ def save_plot(path: Path, times: np.ndarray, values: np.ndarray, ylabel: str,
     axis.legend(loc="best")
     figure.savefig(path, dpi=150)
     plt.close(figure)
+
+
+def trajectory_times(document: dict, trajectory: np.ndarray,
+                     start_sec: float | None) -> tuple[np.ndarray, float]:
+    if start_sec is None:
+        start_sec = document.get("turn_start_sec", 0.0)
+    if (isinstance(start_sec, bool) or not isinstance(start_sec, (int, float)) or
+            not math.isfinite(start_sec) or start_sec < 0):
+        raise ValueError("turn-relative start time must be a finite number greater than or equal to zero")
+    value = float(start_sec)
+    return value + np.arange(len(trajectory)) / float(document["fps"]), value
+
+
+def save_rpy_combined(path: Path, series: dict[str, tuple[np.ndarray, np.ndarray]],
+                      title: str, time_limits: tuple[float, float]) -> None:
+    figure, axis = plt.subplots(figsize=(13, 6))
+    for source, (times, trajectory) in series.items():
+        for column, name in enumerate(AXES):
+            axis.plot(times, trajectory[:, column] * RAD2DEG,
+                      color=AXIS_COLORS[name], linestyle=SOURCE_STYLES.get(source, "-"),
+                      label=f"{source} {name.capitalize()}", linewidth=1.2)
+    axis.set_xlabel("Turn relative time (s)")
+    axis.set_ylabel("RPY angle (degree)")
+    axis.set_title(title)
+    axis.set_xlim(time_limits)
+    axis.grid(True, alpha=0.25)
+    axis.legend(loc="best")
+    figure.tight_layout()
+    figure.savefig(path, dpi=150)
+    plt.close(figure)
+
+
+def save_rpy_subplots(path: Path, series: dict[str, tuple[np.ndarray, np.ndarray]],
+                      title: str, time_limits: tuple[float, float]) -> None:
+    figure, axes = plt.subplots(3, 1, figsize=(13, 10), sharex=True)
+    for column, (axis, name) in enumerate(zip(axes, AXES)):
+        for source, (times, trajectory) in series.items():
+            axis.plot(times, trajectory[:, column] * RAD2DEG,
+                      color=SOURCE_COLORS.get(source), linestyle=SOURCE_STYLES.get(source, "-"),
+                      label=source, linewidth=1.2)
+        axis.set_ylabel(f"{name.capitalize()} (degree)")
+        axis.grid(True, alpha=0.25)
+        axis.legend(loc="best")
+    axes[-1].set_xlabel("Turn relative time (s)")
+    axes[-1].set_xlim(time_limits)
+    figure.suptitle(title)
+    figure.tight_layout()
+    figure.savefig(path, dpi=150)
+    plt.close(figure)
+
+
+def save_rpy_visualizations(output_dir: Path,
+                            series: dict[str, tuple[np.ndarray, np.ndarray]]) -> None:
+    end_sec = max(times[-1] for times, _ in series.values())
+    time_limits = (0.0, end_sec if end_sec > 0.0 else 1.0)
+    for source, values in series.items():
+        source_series = {source: values}
+        save_rpy_combined(
+            output_dir / f"{source}_rpy_combined.png", source_series,
+            f"{source.capitalize()} RPY", time_limits,
+        )
+        save_rpy_subplots(
+            output_dir / f"{source}_rpy_axes.png", source_series,
+            f"{source.capitalize()} RPY by Axis", time_limits,
+        )
+    if len(series) > 1:
+        sources = "_".join(series)
+        source_names = " and ".join(source.capitalize() for source in series)
+        save_rpy_combined(
+            output_dir / f"{sources}_rpy_combined.png", series,
+            f"{source_names} RPY", time_limits,
+        )
+        save_rpy_subplots(
+            output_dir / f"{sources}_rpy_axes.png", series,
+            f"{source_names} RPY by Axis", time_limits,
+        )
 
 
 def _maximum(values: np.ndarray, frame_offset: int) -> tuple[float, int]:
@@ -400,7 +481,14 @@ def print_report(summary: dict, trajectory: np.ndarray, velocity: np.ndarray) ->
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Visualize and record a machine-head trajectory segment")
-    parser.add_argument("trajectory_json", type=Path)
+    parser.add_argument("trajectory_json", type=Path, nargs="?",
+                        help="predicted RPY trajectory JSON")
+    parser.add_argument("--measured-rpy", type=Path, default=None,
+                        help="measured/real RPY trajectory JSON")
+    parser.add_argument("--predicted-start-sec", type=float, default=None,
+                        help="predicted trajectory start on the Turn-relative timeline")
+    parser.add_argument("--measured-start-sec", type=float, default=None,
+                        help="measured trajectory start on the Turn-relative timeline")
     parser.add_argument("--run", default=None, help="existing/new run ID: run_YYYYMMDD_XXX")
     parser.add_argument("--role", choices=sorted(VALID_ROLES), default=None)
     parser.add_argument("--turn-id", default=None)
@@ -414,10 +502,25 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    input_path = args.trajectory_json.resolve()
-    document, trajectory, states = load_trajectory(input_path)
+    if args.trajectory_json is None and args.measured_rpy is None:
+        raise ValueError("provide a predicted trajectory JSON or --measured-rpy")
+
+    predicted = None
+    if args.trajectory_json is not None:
+        predicted_path = args.trajectory_json.resolve()
+        predicted_document, predicted_trajectory, predicted_states = load_trajectory(predicted_path)
+        predicted = (predicted_path, predicted_document, predicted_trajectory, predicted_states)
+    measured = None
+    if args.measured_rpy is not None:
+        measured_path = args.measured_rpy.resolve()
+        measured_document, measured_trajectory, measured_states = load_trajectory(measured_path)
+        measured = (measured_path, measured_document, measured_trajectory, measured_states)
+
+    primary = predicted or measured
+    assert primary is not None
+    input_path, document, trajectory, states = primary
     summary, velocity, acceleration = analyze(document, trajectory, states)
-    role = infer_role(args.role, states)
+    role = "measured" if predicted is None and args.role is None else infer_role(args.role, states)
 
     project_root = find_project_root()
     timestamp_value = datetime.now().astimezone()
@@ -461,12 +564,34 @@ def main() -> None:
 
     shutil.copyfile(input_path, segment_dir / "raw_trajectory.json")
     write_raw_csv(segment_dir / "raw_rpy.csv", trajectory, states, fps)
-    save_plot(segment_dir / "rpy_position.png", np.arange(len(trajectory)) / fps,
-              trajectory, "RPY position (radian)", "RPY Position", states, fps)
-    save_plot(segment_dir / "rpy_velocity.png", np.arange(1, len(trajectory)) / fps,
-              velocity, "angular velocity (rad/s)", "RPY Angular Velocity", states, fps)
-    save_plot(segment_dir / "rpy_acceleration.png", np.arange(2, len(trajectory)) / fps,
-              acceleration, "angular acceleration (rad/s²)", "RPY Angular Acceleration", states, fps)
+
+    rpy_series: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+    primary_start_sec = 0.0
+    if measured is not None:
+        _, measured_document, measured_trajectory, _ = measured
+        measured_times, measured_start_sec = trajectory_times(
+            measured_document, measured_trajectory, args.measured_start_sec
+        )
+        rpy_series["measured"] = (measured_times, measured_trajectory)
+        if predicted is None:
+            primary_start_sec = measured_start_sec
+    if predicted is not None:
+        _, predicted_document, predicted_trajectory, _ = predicted
+        predicted_times, predicted_start_sec = trajectory_times(
+            predicted_document, predicted_trajectory, args.predicted_start_sec
+        )
+        rpy_series["predicted"] = (predicted_times, predicted_trajectory)
+        primary_start_sec = predicted_start_sec
+    save_rpy_visualizations(segment_dir, rpy_series)
+
+    save_plot(segment_dir / "rpy_velocity.png",
+              primary_start_sec + np.arange(1, len(trajectory)) / fps,
+              velocity, "angular velocity (rad/s)", "RPY Angular Velocity", states, fps,
+              primary_start_sec)
+    save_plot(segment_dir / "rpy_acceleration.png",
+              primary_start_sec + np.arange(2, len(trajectory)) / fps,
+              acceleration, "angular acceleration (rad/s²)", "RPY Angular Acceleration", states, fps,
+              primary_start_sec)
     write_json_atomic(segment_dir / "summary.json", summary)
 
     segment_config = {

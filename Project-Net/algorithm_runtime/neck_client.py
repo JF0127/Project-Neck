@@ -2,12 +2,19 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 import socket
 
 
 class NeckClient:
-    def __init__(self, socket_path: str = "/tmp/neck_model.sock", mock: bool = False):
+    def __init__(
+        self,
+        socket_path: str = "/tmp/neck_model.sock",
+        mock: bool = False,
+        measurement_socket_path: str = "/tmp/neck_measurement.sock",
+    ):
         self.socket_path = socket_path
+        self.measurement_socket_path = measurement_socket_path
         self.mock = mock
         self.send_count = 0
 
@@ -41,7 +48,42 @@ class NeckClient:
             f"last={document['trajectory'][-1]}"
         )
 
-    def send(self, document: dict) -> None:
+    def _configure_measurement(
+        self,
+        trajectory_name: str,
+        output_path: Path,
+        turn_origin_unix_sec: float,
+    ) -> None:
+        values = (trajectory_name, str(output_path), f"{turn_origin_unix_sec:.9f}")
+        if any("\n" in value or "\r" in value for value in values):
+            raise ValueError("measurement metadata must not contain newlines")
+        request = (
+            f"NECK_MEASUREMENT_V1\n{trajectory_name}\n"
+            f"{turn_origin_unix_sec:.9f}\n{output_path}\n"
+        ).encode("utf-8")
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(2.0)
+            client.connect(self.measurement_socket_path)
+            client.sendall(request)
+            client.shutdown(socket.SHUT_WR)
+            response = bytearray()
+            while True:
+                chunk = client.recv(1024)
+                if not chunk:
+                    break
+                response.extend(chunk)
+                if len(response) > 4096:
+                    raise RuntimeError("measurement socket response is too large")
+        text = response.decode("utf-8", errors="replace").strip()
+        if text != "OK":
+            raise RuntimeError(f"measurement configuration rejected: {text or 'empty response'}")
+
+    def send(
+        self,
+        document: dict,
+        measured_output_path: Path | None = None,
+        turn_origin_unix_sec: float | None = None,
+    ) -> None:
         self.validate(document)
         self.print_summary(document)
         payload = json.dumps(document, separators=(",", ":"), allow_nan=False).encode("utf-8")
@@ -49,6 +91,17 @@ class NeckClient:
         if self.mock:
             print(f"[runtime][neck] mock send #{self.send_count}: {len(payload)} JSON bytes")
             return
+
+        if measured_output_path is not None and turn_origin_unix_sec is not None:
+            try:
+                self._configure_measurement(
+                    document["name"], measured_output_path, turn_origin_unix_sec
+                )
+            except Exception as exc:
+                print(
+                    f"[runtime][neck][warning] measured RPY disabled for this turn: "
+                    f"{type(exc).__name__}: {exc}"
+                )
 
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
             client.settimeout(10.0)

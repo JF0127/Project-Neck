@@ -71,6 +71,15 @@ ethercat 从站默认分配六个通道，CAN1通道为1，2，3；CAN2通道为
     `motor_control.cpp`中的`Rv_Message_Print`方法
   * 最后在需要使用回传数据的线程循环从队列中取出消息即可（注意：`queue.h`中目前使用的是环形缓冲区队列，
     仅能单读单写，如有其他需求请更换队列模型）
+
+## Trajectory Postprocessor V0
+
+模型输入仍为固定 30 fps、radian、`[roll,pitch,yaw]` 的原始 RPY trajectory。Motor 在解析后、最终 precheck 和执行前，使用当前 IK 和 `neck_config.py` 中的真实 motor velocity limits 进行后处理。
+
+V0 只解决相邻帧 motor velocity constraint：对超速的相邻 RPY 段在 30 fps 下做线性插值并增加中间帧，直到插值点重新经过 IK 后的三电机速度均不超限。插入帧继承该段目标帧的 state。原始 trajectory 不会被覆盖，processed trajectory 仍必须通过原有 `precheckNeckTrajectory()`；任何 IK、范围、速度或输出长度异常都会拒绝执行。
+
+当前没有 acceleration/jerk optimizer、复杂 trajectory optimization 或 Socket ACK。Postprocessor 不修改 fps、Socket JSON schema、motor velocity limits 或 IK 参数。
+
 ### 常见问题及解决方案
 * 从站板上电后使用ifconfig无法检测到网口号
   使用虚拟机时需要注意虚拟机与主机之间的网络连接方式，尽可能使用双系统或者Linux系统

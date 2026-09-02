@@ -100,6 +100,7 @@ class ExperimentLogger:
                     "timeline": [],
                     "generation_count": 0,
                     "dialogue": {"turn_id": turn_id},
+                    "turn_origin_unix_sec": time.time(),
                     "ended": False,
                 }
                 if user_stream_id is not None:
@@ -109,6 +110,14 @@ class ExperimentLogger:
         except Exception as exc:
             self._warning(f"start {turn_id}", exc)
         return turn_id
+
+    def measured_rpy_target(self, turn_id: str) -> tuple[Path, float]:
+        with self._lock:
+            turn = self._turns[turn_id]
+            return (
+                (turn["dir"] / "measured_rpy.json").resolve(),
+                float(turn["turn_origin_unix_sec"]),
+            )
 
     def record_event(self, turn_id: str, event: str, **fields: Any) -> None:
         try:

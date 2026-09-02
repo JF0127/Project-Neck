@@ -6,7 +6,9 @@ extern "C" {
 
 #include "queue.h"
 #include <sys/time.h>
+#include <chrono>
 #include <cinttypes>
+#include <cfloat>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
@@ -32,6 +34,20 @@ static std::mutex neckFrameMutex;
 static EtherCAT_Msg neckFrames[SLAVE_NUMBER]{};
 static bool neckFrameActive[SLAVE_NUMBER]{false};
 
+struct MotorFeedbackCache {
+    std::atomic<int> motor_id{0};
+    std::atomic<double> angle_deg{0.0};
+    std::atomic<std::int64_t> received_ns{0};
+    std::atomic<std::uint64_t> sequence{0};
+};
+
+static MotorFeedbackCache neckFeedback[SLAVE_NUMBER][6];
+
+static bool finiteDouble(double value)
+{
+    return value == value && value <= DBL_MAX && value >= -DBL_MAX;
+}
+
 extern "C" bool NeckFramePublish(int slave_id, const EtherCAT_Msg* frame)
 {
     if (frame == nullptr || !running || slave_id < 0 ||
@@ -53,6 +69,51 @@ extern "C" void NeckFrameStop(int slave_id)
     }
     std::lock_guard<std::mutex> lock(neckFrameMutex);
     neckFrameActive[slave_id] = false;
+}
+
+extern "C" bool NeckFeedbackRead(int slave_id, const int passages[3],
+                                  const int motor_ids[3], double angles_deg[3],
+                                  std::uint64_t sequences[3])
+{
+    if (slave_id < 0 || slave_id >= SLAVE_NUMBER || passages == nullptr ||
+        motor_ids == nullptr || angles_deg == nullptr || sequences == nullptr)
+    {
+        return false;
+    }
+
+    const auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    for (int index = 0; index < 3; ++index)
+    {
+        const int passage_index = passages[index] - 1;
+        if (passage_index < 0 || passage_index >= 6)
+        {
+            return false;
+        }
+        const MotorFeedbackCache& feedback =
+            neckFeedback[slave_id][passage_index];
+        const std::uint64_t sequence_before =
+            feedback.sequence.load(std::memory_order_acquire);
+        if (sequence_before == 0 || (sequence_before & 1U) != 0)
+        {
+            return false;
+        }
+        const int motor_id = feedback.motor_id.load(std::memory_order_relaxed);
+        const double angle_deg = feedback.angle_deg.load(std::memory_order_relaxed);
+        const std::int64_t received_ns =
+            feedback.received_ns.load(std::memory_order_relaxed);
+        const std::uint64_t sequence_after =
+            feedback.sequence.load(std::memory_order_acquire);
+        const double age_sec = static_cast<double>(now_ns - received_ns) / 1e9;
+        if (sequence_before != sequence_after || motor_id != motor_ids[index] ||
+            !finiteDouble(angle_deg) || age_sec < 0.0 || age_sec > 0.1)
+        {
+            return false;
+        }
+        angles_deg[index] = angle_deg;
+        sequences[index] = sequence_after / 2;
+    }
+    return true;
 }
 
 #define EC_TIMEOUTMON 500
@@ -370,6 +431,46 @@ void EtherCAT_Data_Get()
             Rx_Message[slave] = *(EtherCAT_Msg*)(ec_slave[slave + 1].inputs);
 
         RV_can_data_repack(&Rx_Message[slave], comm_ack, Rx_Motor_Msg[slave], slave, isConfig[slave]);
+
+        const auto feedback_time_ns =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+        for (int passage = 0; passage < 6; ++passage)
+        {
+            const Motor_Msg& raw = Rx_Message[slave].motor[passage];
+            if (raw.dlc == 0 || raw.id == 0x7FF)
+            {
+                continue;
+            }
+            const int ack_status = raw.data[0] >> 5;
+            double angle_deg = 0.0;
+            if (ack_status == 1)
+            {
+                angle_deg = Rx_Motor_Msg[slave][passage].angle_actual_rad *
+                            180.0 / 3.14159265358979323846;
+            }
+            else if (ack_status == 2)
+            {
+                angle_deg = Rx_Motor_Msg[slave][passage].angle_actual_float;
+            }
+            else
+            {
+                continue;
+            }
+            if (!finiteDouble(angle_deg))
+            {
+                continue;
+            }
+            MotorFeedbackCache& feedback = neckFeedback[slave][passage];
+            feedback.sequence.fetch_add(1, std::memory_order_acq_rel);
+            feedback.motor_id.store(
+                Rx_Motor_Msg[slave][passage].motor_id,
+                std::memory_order_relaxed);
+            feedback.angle_deg.store(angle_deg, std::memory_order_relaxed);
+            feedback.received_ns.store(feedback_time_ns,
+                                       std::memory_order_relaxed);
+            feedback.sequence.fetch_add(1, std::memory_order_release);
+        }
 
         if (isConfig[slave])
         {

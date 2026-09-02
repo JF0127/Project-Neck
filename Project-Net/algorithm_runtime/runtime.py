@@ -48,6 +48,7 @@ class AlgorithmRuntime:
         motion_device: str = "cpu",
         asr_language: str | None = "en",
         neck_socket: str = "/tmp/neck_model.sock",
+        neck_measurement_socket: str = "/tmp/neck_measurement.sock",
         mock_neck: bool = False,
         num_candidates: int = 8,
         experiment_logger: ExperimentLogger | None = None,
@@ -63,7 +64,11 @@ class AlgorithmRuntime:
         self.motion = ResidentMotionModel(
             checkpoint, device=motion_device, num_candidates=num_candidates
         )
-        self.neck = NeckClient(neck_socket, mock=mock_neck)
+        self.neck = NeckClient(
+            neck_socket,
+            mock=mock_neck,
+            measurement_socket_path=neck_measurement_socket,
+        )
         print(f"[runtime] ready; state={self.state.value}")
 
     def _set_state(self, state: RuntimeState) -> None:
@@ -210,7 +215,18 @@ class AlgorithmRuntime:
                         motion.document,
                     )
 
-                await asyncio.to_thread(self.neck.send, motion.document)
+                measured_output_path = None
+                turn_origin_unix_sec = None
+                if self.experiment_logger is not None and turn_id is not None:
+                    measured_output_path, turn_origin_unix_sec = (
+                        self.experiment_logger.measured_rpy_target(turn_id)
+                    )
+                await asyncio.to_thread(
+                    self.neck.send,
+                    motion.document,
+                    measured_output_path,
+                    turn_origin_unix_sec,
+                )
                 if self.experiment_logger is not None and turn_id is not None:
                     self.experiment_logger.record_event(
                         turn_id, "neck_trajectory_sent", mock=self.neck.mock

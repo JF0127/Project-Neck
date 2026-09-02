@@ -1,7 +1,9 @@
 #include "neck/neck_motion.h"
 
+#include "neck/measured_rpy.h"
 #include "neck/neck_config.h"
 #include "neck/neck_sequence.h"
+#include "neck/trajectory_postprocessor.h"
 #include "queue.h"
 
 extern "C" {
@@ -86,9 +88,46 @@ EtherCAT_Msg makeStopFrame(const NeckConfig& config) {
 }
 
 void runTrajectory(std::vector<EtherCAT_Msg> frames,
-                   std::string trajectory_name, double fps, int slave_id) {
+                   std::string trajectory_name, double fps, int slave_id,
+                   NeckConfig config, bool measurement_enabled,
+                   MeasuredRpyRequest measurement_request) {
     const auto start = std::chrono::steady_clock::now();
+    const double trajectory_start_sec =
+        std::chrono::duration<double>(
+            std::chrono::system_clock::now().time_since_epoch()).count() -
+        measurement_request.turn_origin_unix_sec;
     bool publish_failed = false;
+    std::vector<MeasuredRpySample> measured_samples;
+    std::uint64_t last_sequences[3]{};
+
+    const auto capture_feedback = [&] {
+        if (!measurement_enabled) {
+            return;
+        }
+        const double timestamp_sec =
+            std::chrono::duration<double>(
+                std::chrono::system_clock::now().time_since_epoch()).count() -
+            measurement_request.turn_origin_unix_sec;
+        std::uint64_t sequences[3]{};
+        MeasuredRpySample sample;
+        if (!sampleMeasuredRpy(config, timestamp_sec, sequences, sample)) {
+            return;
+        }
+        bool all_new = measured_samples.empty();
+        if (!all_new) {
+            all_new = true;
+            for (int index = 0; index < 3; ++index) {
+                all_new = all_new && sequences[index] != last_sequences[index];
+            }
+        }
+        if (!all_new) {
+            return;
+        }
+        measured_samples.push_back(sample);
+        for (int index = 0; index < 3; ++index) {
+            last_sequences[index] = sequences[index];
+        }
+    };
 
     for (std::size_t index = 0; index < frames.size(); ++index) {
         const auto deadline = start +
@@ -99,6 +138,7 @@ void runTrajectory(std::vector<EtherCAT_Msg> frames,
             })) {
             break;
         }
+        capture_feedback();
         if (!NeckFramePublish(slave_id, &frames[index])) {
             std::cerr << "[NeckMotion] publish failed at frame " << index
                       << "\n";
@@ -116,10 +156,24 @@ void runTrajectory(std::vector<EtherCAT_Msg> frames,
             motion_condition.wait_until(lock, end_time, [] {
                 return motion_stop_requested;
             });
+            capture_feedback();
         }
 
         const bool stopped = motion_stop_requested;
         NeckFrameStop(slave_id);
+        if (measurement_enabled) {
+            std::string measurement_error;
+            if (writeMeasuredRpy(measurement_request, fps,
+                                 trajectory_start_sec, measured_samples,
+                                 measurement_error)) {
+                std::cout << "[MeasuredRPY] saved "
+                          << measured_samples.size() << " samples to "
+                          << measurement_request.output_path << "\n";
+            } else {
+                std::cerr << "[MeasuredRPY] not saved: "
+                          << measurement_error << "\n";
+            }
+        }
         motion_slave = -1;
         motion_active = false;
         lock.unlock();
@@ -143,6 +197,9 @@ void runTrajectory(std::vector<EtherCAT_Msg> frames,
 bool executeTrajectory(const Trajectory& trajectory,
                        std::string& error_message) {
     error_message.clear();
+    MeasuredRpyRequest measurement_request;
+    const bool measurement_enabled =
+        takeMeasuredRpyRequest(trajectory.name, measurement_request);
     if (isTrajectoryExecuting()) {
         error_message = "another neck trajectory is already executing";
         return false;
@@ -153,9 +210,20 @@ bool executeTrajectory(const Trajectory& trajectory,
         return false;
     }
 
+    Trajectory processed_trajectory;
+    TrajectoryPostprocessStats postprocess_stats;
+    if (!postprocessNeckTrajectory(trajectory, config, processed_trajectory,
+                                   postprocess_stats, error_message)) {
+        error_message = "trajectory postprocess failed: " + error_message;
+        return false;
+    }
+    printTrajectoryPostprocessStats(postprocess_stats);
+
     std::vector<MotorAngles> motor_targets;
-    if (!precheckNeckTrajectory(trajectory, config, motor_targets,
+    if (!precheckNeckTrajectory(processed_trajectory, config, motor_targets,
                                 error_message)) {
+        error_message = "postprocessed trajectory precheck failed: " +
+                        error_message;
         return false;
     }
 
@@ -181,8 +249,9 @@ bool executeTrajectory(const Trajectory& trajectory,
     motion_slave = slave_id;
     motion_stop_frame = makeStopFrame(config);
     try {
-        std::thread(runTrajectory, std::move(frames), trajectory.name,
-                    trajectory.fps, slave_id).detach();
+        std::thread(runTrajectory, std::move(frames), processed_trajectory.name,
+                    processed_trajectory.fps, slave_id, config, measurement_enabled,
+                    std::move(measurement_request)).detach();
     } catch (const std::exception& exception) {
         motion_active = false;
         motion_slave = -1;
@@ -192,8 +261,8 @@ bool executeTrajectory(const Trajectory& trajectory,
     }
     lock.unlock();
 
-    std::cout << "[NeckMotion] trajectory accepted: name=" << trajectory.name
-              << " fps=" << trajectory.fps
+    std::cout << "[NeckMotion] trajectory accepted: name=" << processed_trajectory.name
+              << " fps=" << processed_trajectory.fps
               << " frames=" << motor_targets.size() << "\n";
     return true;
 }

@@ -104,6 +104,13 @@ bool ModelSocketServer::start(std::string& error_message) {
         removeOwnedSocket();
         return false;
     }
+    if (chmod(socket_path_.c_str(), 0666) != 0) {
+        error_message = systemError("chmod() failed for model socket");
+        close(listen_fd_);
+        listen_fd_ = -1;
+        removeOwnedSocket();
+        return false;
+    }
 
     running_ = true;
     try {

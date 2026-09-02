@@ -11,6 +11,7 @@
 
 #include "Console.hpp"
 #include "command.h"
+#include "neck/measured_rpy.h"
 #include "neck/model_socket.h"
 #include "neck/neck_motion.h"
 #include "time.h"
@@ -75,8 +76,15 @@ int main()
 {
     printf("SOEM 主站测试\n");
 
-    ModelSocketServer model_socket;
+    MeasurementSocketServer measurement_socket;
     std::string socket_error;
+    if (!measurement_socket.start(socket_error))
+    {
+        std::cerr << "测量 Socket 启动失败: " << socket_error << "\n";
+        return 1;
+    }
+
+    ModelSocketServer model_socket;
     if (!model_socket.start(socket_error))
     {
         std::cerr << "模型 Socket 启动失败: " << socket_error << "\n";
@@ -100,6 +108,7 @@ int main()
     comThread.join();
 
     model_socket.stop();
+    measurement_socket.stop();
     if (isTrajectoryExecuting())
     {
         std::string stop_error;

@@ -81,9 +81,16 @@ class FakeNeck:
 
     def __init__(self):
         self.documents: list[dict] = []
+        self.measurement_targets: list[tuple[Path | None, float | None]] = []
 
-    def send(self, document: dict) -> None:
+    def send(
+        self,
+        document: dict,
+        measured_output_path: Path | None = None,
+        turn_origin_unix_sec: float | None = None,
+    ) -> None:
         self.documents.append(document)
+        self.measurement_targets.append((measured_output_path, turn_origin_unix_sec))
 
 
 def make_runtime(logger: ExperimentLogger) -> AlgorithmRuntime:
@@ -162,6 +169,9 @@ class ExperimentLoggingTest(unittest.TestCase):
 
                 neck_record = json.loads((turn_dir / "neck_rpy.json").read_text(encoding="utf-8"))
                 sent = runtime.neck.documents[index]
+                measured_path, turn_origin = runtime.neck.measurement_targets[index]
+                self.assertEqual(measured_path, turn_dir / "measured_rpy.json")
+                self.assertIsInstance(turn_origin, float)
                 self.assertEqual(neck_record["trajectory"], sent["trajectory"])
                 self.assertNotEqual(listener["trajectory"], sent["trajectory"])
                 self.assertEqual(neck_record["states"], sent["states"])
