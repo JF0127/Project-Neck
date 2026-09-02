@@ -8,9 +8,9 @@ from typing import Callable
 import numpy as np
 import torch
 
-from models.neck_motion.cvae import build_model
-from models.neck_motion.rotations import matrix_to_rpy, rpy_to_matrix
-from models.neck_motion.text_features import START_OF_DIALOGUE, Vocab, encode_word_timestamps
+from neck_motion.cvae import build_model
+from neck_motion.rotations import matrix_to_rpy, rpy_to_matrix
+from neck_motion.text_features import START_OF_DIALOGUE, Vocab, encode_word_timestamps
 
 SAMPLE_RATE = 16_000
 FPS = 30.0

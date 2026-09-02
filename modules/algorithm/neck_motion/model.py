@@ -25,8 +25,8 @@ import math
 import torch
 import torch.nn as nn
 
-from models.neck_motion.audio_features import LogMelExtractor, interpolate_mel_to_frames
-from models.neck_motion.text_features import PAD, align_words_to_frames
+from neck_motion.audio_features import LogMelExtractor, interpolate_mel_to_frames
+from neck_motion.text_features import PAD, align_words_to_frames
 
 PAD_IDX = 0  # 与 text_features.SPECIAL_TOKENS 顺序一致（<PAD> 恒为 0）
 

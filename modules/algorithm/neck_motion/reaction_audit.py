@@ -22,9 +22,9 @@ from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from models.neck_motion.overlap_filter import load_fragments
+from neck_motion.overlap_filter import load_fragments
 
 START_DELAY = 0.2
 MAX_LEN = 2.0

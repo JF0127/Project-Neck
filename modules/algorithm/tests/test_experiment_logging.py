@@ -9,10 +9,10 @@ import unittest
 
 import numpy as np
 
-from algorithm_runtime.dialogue import FixedDialogue
-from algorithm_runtime.experiment_logger import ExperimentLogger
-from algorithm_runtime.motion import MotionTurn
-from algorithm_runtime.runtime import AlgorithmRuntime, RuntimeState
+from runtime.dialogue import FixedDialogue
+from runtime.experiment_logger import ExperimentLogger
+from runtime.motion import MotionTurn
+from runtime.runtime import AlgorithmRuntime, RuntimeState
 
 
 class FakeWord:

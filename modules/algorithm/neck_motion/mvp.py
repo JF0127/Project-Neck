@@ -25,7 +25,7 @@ robot_actual_initial 仅是每段开始时的实际姿态（坐标系基准）�
 本模块不负责关节限位、速度/加速度/jerk 限制、坐标标定与硬件下发（执行层职责）。
 
 用法：
-    python models/neck_motion/mvp.py --checkpoint outputs/neck_motion_v3/checkpoints/best.pt \
+    python neck_motion/mvp.py --checkpoint outputs/neck_motion_v3/checkpoints/best.pt \
         --events events.json --data-root data/source/response-net/processed_dataset \
         --strategy energy_match
 
@@ -58,12 +58,12 @@ from pathlib import Path
 import numpy as np
 import torch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from models.neck_motion.cvae import build_model as build_model_any
-from models.neck_motion.dataset import build_inference_batch
-from models.neck_motion.rotations import matrix_to_rpy, rpy_to_matrix
-from models.neck_motion.text_features import Vocab
+from neck_motion.cvae import build_model as build_model_any
+from neck_motion.dataset import build_inference_batch
+from neck_motion.rotations import matrix_to_rpy, rpy_to_matrix
+from neck_motion.text_features import Vocab
 
 RAD2DEG = 180.0 / np.pi
 STATE_ID = {"silent": 0, "speaking": 1, "listening": 2}
@@ -282,7 +282,7 @@ def generate(events_spec: dict, checkpoint: str, output_dir: str | None = None,
                 "blend_sec": blend_sec,
                 "max_frame_rate_deg_per_s": round(max_frame_rate, 3),
                 "segments": summaries,
-                "generated_by": "models/neck_motion/mvp.py",
+                "generated_by": "neck_motion/mvp.py",
             },
         }
     # 落盘（与旧 main() 行为一致）

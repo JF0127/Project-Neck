@@ -12,7 +12,7 @@ fragment（当前话语音频 + 文本 + 词级时间戳 + 上一片段文本 + 
 ## 目录结构
 
 ```
-models/neck_motion/
+neck_motion/
   __init__.py       包说明
   config.yaml       默认配置（数据/音频/文本/模型/损失/训练）
   dataset.py        JSONL + RPY + 音频加载、overlap 过滤、collate
@@ -139,7 +139,7 @@ acceleration MAE（°/s²）、speaker / listener 各自 MAE、首帧误差、
 ### 1. dry-run（推荐先跑，验证全链路，约 1 分钟）
 
 ```bash
-python models/neck_motion/train.py --dry-run
+python neck_motion/train.py --dry-run
 ```
 
 完成：数据加载 → 特征提取 → forward → loss → backward → optimizer step，
@@ -151,21 +151,21 @@ padding 不计入 loss、Speaker/Listener 路由、首帧为零、无 NaN/Inf）
 
 ```bash
 # 默认配置（config.yaml：30 epochs，batch 16，lr 1e-4，num_workers 4）
-python models/neck_motion/train.py
+python neck_motion/train.py
 
 # 自定义
-python models/neck_motion/train.py \
-    --config models/neck_motion/config.yaml \
+python neck_motion/train.py \
+    --config neck_motion/config.yaml \
     --epochs 30 --batch-size 16 --lr 1e-4 --num-workers 4 --seed 42 \
     --output-dir outputs/neck_motion
 
-python models/neck_motion/train.py \
-    --config models/neck_motion/config.yaml \
+python neck_motion/train.py \
+    --config neck_motion/config.yaml \
     --epochs 10 --batch-size 16 --lr 1e-4 --num-workers 4 --seed 42 \
     --output-dir outputs/neck_motion
 
 # 断点续训
-python models/neck_motion/train.py --resume outputs/neck_motion/checkpoints/last.pt
+python neck_motion/train.py --resume outputs/neck_motion/checkpoints/last.pt
 ```
 
 - 设备自动选择 CUDA → MPS → CPU；`--device cpu/cuda/mps` 可强制。
@@ -176,7 +176,7 @@ python models/neck_motion/train.py --resume outputs/neck_motion/checkpoints/last
 ### 2b. 重叠过滤核对（可选）
 
 ```bash
-python models/neck_motion/analyze_overlap.py
+python neck_motion/analyze_overlap.py
 ```
 
 导出 overlap 分布、被过滤 fragment 明细（CSV）与 true_overlap 映射到
@@ -190,7 +190,7 @@ python models/neck_motion/analyze_overlap.py
 ### 3. 推理
 
 ```bash
-python models/neck_motion/infer.py \
+python neck_motion/infer.py \
     --checkpoint outputs/neck_motion/checkpoints/best.pt \
     --input sample.json \
     --data-root data/source/response-net/processed_dataset
@@ -209,14 +209,14 @@ python models/neck_motion/infer.py \
 
 ```bash
 # 全零、仅 role 均值基线（train 统计 -> val 评估，与模型同过滤条件）
-python models/neck_motion/baselines.py
+python neck_motion/baselines.py
 
 # 消融训练：去音频 / 去文本（输出到 outputs/neck_motion/ablate_<name>/）
-python models/neck_motion/train.py --epochs 5 --ablate audio
-python models/neck_motion/train.py --epochs 5 --ablate text
+python neck_motion/train.py --epochs 5 --ablate audio
+python neck_motion/train.py --epochs 5 --ablate text
 
 # 用 checkpoint 在 val/test 上重新评估（含轨迹诊断）
-python models/neck_motion/eval.py --checkpoint outputs/neck_motion/checkpoints/best.pt --split val
+python neck_motion/eval.py --checkpoint outputs/neck_motion/checkpoints/best.pt --split val
 ```
 
 ### 第一版基线结论（修正过滤后，5 epoch 试验）
@@ -480,7 +480,7 @@ Silent    → 规则化保持/回中（统一坐标线性回中到 robot_neutral
 若两者不同，Silent 段结束时绝对姿态精确回到 neutral（已验证，偏差 <1e-5）。
 
 ```bash
-python models/neck_motion/mvp.py --checkpoint outputs/neck_motion_v3/checkpoints/best.pt \
+python neck_motion/mvp.py --checkpoint outputs/neck_motion_v3/checkpoints/best.pt \
     --events events.json --data-root data/source/response-net/processed_dataset \
     --strategy energy_match
 ```
@@ -522,10 +522,10 @@ Silent 回中到 robot_neutral_pose）+ 统一坐标轨迹输出。
 ### 推理 / 评估入口
 
 ```bash
-python models/neck_motion/infer.py --checkpoint .../best.pt --input sample.json  # 单段
-python models/neck_motion/eval.py --checkpoint .../best.pt --samples 10          # 采样指标
-python models/neck_motion/diagnose.py --checkpoint .../best.pt                   # 错配诊断
-python models/neck_motion/condition_probe.py --task speaker|listener --seeds 5   # 条件信号探针
+python neck_motion/infer.py --checkpoint .../best.pt --input sample.json  # 单段
+python neck_motion/eval.py --checkpoint .../best.pt --samples 10          # 采样指标
+python neck_motion/diagnose.py --checkpoint .../best.pt                   # 错配诊断
+python neck_motion/condition_probe.py --task speaker|listener --seeds 5   # 条件信号探针
 ```
 
 ---

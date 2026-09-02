@@ -36,6 +36,6 @@ modules/motor/build/
 modules/motor/logs/audit_*/
 
 # ---------------- whisper 模型(145MB, 可从 hf-mirror 重新下载) ----------------
-model/
+/models
 
 experiments/

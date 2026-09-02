@@ -17,7 +17,7 @@ import math
 import torch
 import torch.nn as nn
 
-from models.neck_motion.model import (
+from neck_motion.model import (
     ConditionEncoder,
     SequenceDecoder,
     route_and_zero_first,
@@ -241,11 +241,11 @@ def build_model(cfg: dict, vocab_size: int) -> nn.Module:
     if t == "cvae":
         return build_fragment_cvae(cfg, vocab_size)
     if t == "candidates":
-        from models.neck_motion.candidates import build_multi_candidate_model
+        from neck_motion.candidates import build_multi_candidate_model
         return build_multi_candidate_model(cfg, vocab_size)
     return _build_regression(cfg, vocab_size)
 
 
 def _build_regression(cfg: dict, vocab_size: int):
-    from models.neck_motion.model import build_neck_motion_model
+    from neck_motion.model import build_neck_motion_model
     return build_neck_motion_model(cfg, vocab_size)

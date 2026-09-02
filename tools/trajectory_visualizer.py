@@ -4,15 +4,11 @@ from __future__ import annotations
 
 import argparse
 import csv
-from datetime import datetime
 import json
 import math
 from pathlib import Path
 import re
-import shlex
 import shutil
-import subprocess
-import sys
 from typing import Any
 
 try:
@@ -32,12 +28,8 @@ SOURCE_COLORS = {"measured": "#1f77b4", "predicted": "#d62728", "processed": "#2
 VALID_STATES = {"listening", "speaking", "silent"}
 STATE_COLORS = {"listening": "#d9edf7", "speaking": "#fce8b2", "silent": "#eeeeee"}
 RAD2DEG = 180.0 / math.pi
-TOOL_VERSION = "2.0.0"
-EXPERIMENT_TYPE = "v0_trajectory"
-RUN_PATTERN = re.compile(r"^run_(\d{8})_(\d{3,})$")
-SEGMENT_PATTERN = re.compile(r"^segment_(\d+)_")
-ROLE_FROM_STATE = {"listening": "listener", "speaking": "speaker", "silent": "silent"}
-VALID_ROLES = set(ROLE_FROM_STATE.values())
+TOOL_VERSION = "3.0.0"
+TURN_PATTERN = re.compile(r"^turn_(\d+)$")
 
 
 def load_trajectory(path: Path) -> tuple[dict, np.ndarray, list[str] | None]:
@@ -275,88 +267,36 @@ def analyze(document: dict, trajectory: np.ndarray, states: list[str] | None) ->
 
 def find_project_root() -> Path:
     """Locate Project-Neck from this script, without depending on the caller cwd."""
-    script = Path(__file__).resolve()
-    for candidate in script.parents:
-        if (candidate / "modules/algorithm").is_dir() and (candidate / "modules/motor").is_dir():
-            return candidate
-    raise RuntimeError("cannot locate Project-Neck root from trajectory_visualizer.py")
+    project_root = Path(__file__).resolve().parents[1]
+    if not (project_root / "modules/algorithm").is_dir():
+        raise RuntimeError("cannot locate Project-Neck root from trajectory_visualizer.py")
+    return project_root
 
 
-def git_commit(project_dir: Path) -> str | None:
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(project_dir), "rev-parse", "HEAD"],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        value = result.stdout.strip()
-        return value or None
-    except (OSError, subprocess.SubprocessError):
-        return None
+def resolve_session(value: str, project_root: Path) -> Path:
+    requested = Path(value).expanduser()
+    candidates = [requested]
+    if not requested.is_absolute():
+        candidates.extend([
+            project_root / requested,
+            project_root / "experiments/v0_trajectory/sessions" / requested,
+        ])
+    for candidate in candidates:
+        if candidate.is_dir():
+            return candidate.resolve()
+    raise ValueError(f"session directory does not exist: {value}")
 
 
-def create_automatic_run(runs_dir: Path, timestamp: datetime) -> tuple[Path, str, bool]:
-    """Create run_YYYYMMDD_XXX atomically; numbering restarts each local day."""
-    runs_dir.mkdir(parents=True, exist_ok=True)
-    date = timestamp.strftime("%Y%m%d")
-    numbers = []
-    for child in runs_dir.iterdir():
-        match = RUN_PATTERN.match(child.name) if child.is_dir() else None
-        if match and match.group(1) == date:
-            numbers.append(int(match.group(2)))
-    number = max(numbers, default=0) + 1
-    while True:
-        run_id = f"run_{date}_{number:03d}"
-        run_dir = runs_dir / run_id
-        try:
-            run_dir.mkdir()
-            return run_dir, run_id, True
-        except FileExistsError:
-            number += 1
-
-
-def resolve_run(runs_dir: Path, requested: str | None,
-                timestamp: datetime) -> tuple[Path, str, bool]:
-    if requested is None:
-        return create_automatic_run(runs_dir, timestamp)
-    if not RUN_PATTERN.fullmatch(requested):
-        raise ValueError("--run must use run_YYYYMMDD_XXX format")
-    runs_dir.mkdir(parents=True, exist_ok=True)
-    run_dir = runs_dir / requested
-    try:
-        run_dir.mkdir()
-        created = True
-    except FileExistsError:
-        if not run_dir.is_dir():
-            raise ValueError(f"run path exists but is not a directory: {run_dir}")
-        created = False
-    return run_dir, requested, created
-
-
-def create_segment(run_dir: Path, role: str) -> tuple[Path, str, int]:
-    numbers = []
-    for child in run_dir.iterdir():
-        match = SEGMENT_PATTERN.match(child.name) if child.is_dir() else None
+def discover_turns(session_dir: Path) -> list[Path]:
+    turns_dir = session_dir / "turns"
+    if not turns_dir.is_dir():
+        raise ValueError(f"session has no turns directory: {turns_dir}")
+    turns = []
+    for child in turns_dir.iterdir():
+        match = TURN_PATTERN.fullmatch(child.name) if child.is_dir() else None
         if match:
-            numbers.append(int(match.group(1)))
-    index = max(numbers, default=0) + 1
-    while True:
-        segment_id = f"segment_{index:03d}_{role}"
-        segment_dir = run_dir / segment_id
-        try:
-            segment_dir.mkdir()
-            return segment_dir, segment_id, index
-        except FileExistsError:
-            index += 1
-
-
-def segment_count(run_dir: Path) -> int:
-    return sum(
-        1 for child in run_dir.iterdir()
-        if child.is_dir() and SEGMENT_PATTERN.match(child.name)
-    )
+            turns.append((int(match.group(1)), child))
+    return [path for _, path in sorted(turns)]
 
 
 def write_json_atomic(path: Path, value: dict) -> None:
@@ -364,15 +304,6 @@ def write_json_atomic(path: Path, value: dict) -> None:
     with temporary.open("w", encoding="utf-8") as handle:
         json.dump(value, handle, ensure_ascii=False, indent=2, allow_nan=False)
     temporary.replace(path)
-
-
-def infer_role(requested: str | None, states: list[str] | None) -> str:
-    if requested is not None:
-        return requested
-    unique = set(states or [])
-    if len(unique) == 1:
-        return ROLE_FROM_STATE[next(iter(unique))]
-    raise ValueError("--role is required when trajectory states do not identify one segment type")
 
 
 def write_raw_csv(path: Path, trajectory: np.ndarray, states: list[str] | None,
@@ -480,97 +411,77 @@ def print_report(summary: dict, trajectory: np.ndarray, velocity: np.ndarray) ->
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Visualize and record a machine-head trajectory segment")
-    parser.add_argument("trajectory_json", type=Path, nargs="?",
-                        help="predicted RPY trajectory JSON")
-    parser.add_argument("--measured-rpy", type=Path, default=None,
-                        help="measured/real RPY trajectory JSON")
-    parser.add_argument("--predicted-start-sec", type=float, default=None,
-                        help="predicted trajectory start on the Turn-relative timeline")
-    parser.add_argument("--measured-start-sec", type=float, default=None,
-                        help="measured trajectory start on the Turn-relative timeline")
-    parser.add_argument("--run", default=None, help="existing/new run ID: run_YYYYMMDD_XXX")
-    parser.add_argument("--role", choices=sorted(VALID_ROLES), default=None)
-    parser.add_argument("--turn-id", default=None)
-    parser.add_argument("--stream-id", default=None)
-    parser.add_argument("--checkpoint", default=None,
-                        help="record an explicit checkpoint; otherwise use JSON metadata or null")
-    parser.add_argument("--description", default="Machine-head raw trajectory experiment")
-    parser.add_argument("--notes", default="", help="free-form run/segment note")
+    parser = argparse.ArgumentParser(
+        description="Visualize every available turn in a Project-Neck experiment session",
+        epilog=(
+            "examples:\n"
+            "  python3 tools/trajectory_visualizer.py session_20260902_003\n"
+            "  python3 tools/trajectory_visualizer.py "
+            "experiments/v0_trajectory/sessions/session_20260902_003"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "session",
+        help="session ID or path to a session directory",
+    )
     return parser.parse_args()
 
 
-def main() -> None:
-    args = parse_args()
-    if args.trajectory_json is None and args.measured_rpy is None:
-        raise ValueError("provide a predicted trajectory JSON or --measured-rpy")
+def process_turn(turn_dir: Path, output_dir: Path) -> None:
+    predicted_path = turn_dir / "neck_rpy.json"
+    measured_path = turn_dir / "measured_rpy.json"
 
     predicted = None
-    if args.trajectory_json is not None:
-        predicted_path = args.trajectory_json.resolve()
-        predicted_document, predicted_trajectory, predicted_states = load_trajectory(predicted_path)
-        predicted = (predicted_path, predicted_document, predicted_trajectory, predicted_states)
+    if predicted_path.is_file():
+        try:
+            document, trajectory, states = load_trajectory(predicted_path)
+            predicted = (predicted_path, document, trajectory, states)
+        except Exception as exc:
+            print(
+                f"[visualizer][warning] {turn_dir.name}: ignore neck_rpy.json: "
+                f"{type(exc).__name__}: {exc}"
+            )
+
     measured = None
-    if args.measured_rpy is not None:
-        measured_path = args.measured_rpy.resolve()
-        measured_document, measured_trajectory, measured_states = load_trajectory(measured_path)
-        measured = (measured_path, measured_document, measured_trajectory, measured_states)
+    if measured_path.is_file():
+        try:
+            document, trajectory, states = load_trajectory(measured_path)
+            measured = (measured_path, document, trajectory, states)
+        except Exception as exc:
+            print(
+                f"[visualizer][warning] {turn_dir.name}: ignore measured_rpy.json: "
+                f"{type(exc).__name__}: {exc}"
+            )
 
     primary = predicted or measured
-    assert primary is not None
+    if primary is None:
+        raise ValueError("neither neck_rpy.json nor measured_rpy.json exists")
+
     input_path, document, trajectory, states = primary
     summary, velocity, acceleration = analyze(document, trajectory, states)
-    role = "measured" if predicted is None and args.role is None else infer_role(args.role, states)
-
-    project_root = find_project_root()
-    timestamp_value = datetime.now().astimezone()
-    timestamp = timestamp_value.isoformat(timespec="seconds")
-    runs_dir = project_root / "experiments" / EXPERIMENT_TYPE / "runs"
-    run_dir, run_id, run_created = resolve_run(runs_dir, args.run, timestamp_value)
-    segment_dir, segment_id, segment_index = create_segment(run_dir, role)
-
-    net_commit = git_commit(project_root / "modules/algorithm")
-    motor_commit = git_commit(project_root / "modules/motor")
-    checkpoint = args.checkpoint or explicit_checkpoint(document)
-    fps = float(document["fps"])
-    run_config_path = run_dir / "run_config.json"
-    if run_created or not run_config_path.exists():
-        run_config = {
-            "run_id": run_id,
-            "start_time": timestamp,
-            "experiment_type": EXPERIMENT_TYPE,
-            "description": args.description,
-            "project_net_git_commit": net_commit,
-            "project_motor_git_commit": motor_commit,
-            "checkpoint": checkpoint,
-            "fps": fps,
-            "segment_count": 0,
-            "notes": args.notes,
-        }
-    else:
-        with run_config_path.open("r", encoding="utf-8") as handle:
-            run_config = json.load(handle)
-        if run_config.get("run_id") != run_id:
-            raise ValueError(f"run_config.json run_id mismatch in {run_dir}")
-
-    summary["run_id"] = run_id
-    summary["segment_id"] = segment_id
-    summary["segment_index"] = segment_index
-    summary["role"] = role
-    summary["timestamp"] = timestamp
+    summary["turn_id"] = turn_dir.name
+    summary["tool_version"] = TOOL_VERSION
+    summary["input_file"] = str(input_path)
+    summary["measured_file"] = str(measured_path) if measured is not None else None
+    summary["checkpoint"] = explicit_checkpoint(document)
     summary["max_delta_frame"] = summary["maximum_anomalies"]["frame_delta"]["frame_index"]
     summary["max_velocity_frame"] = summary["maximum_anomalies"]["velocity"]["frame_index"]
     summary["max_acceleration_frame"] = summary["maximum_anomalies"]["acceleration"]["frame_index"]
 
-    shutil.copyfile(input_path, segment_dir / "raw_trajectory.json")
-    write_raw_csv(segment_dir / "raw_rpy.csv", trajectory, states, fps)
+    if output_dir.exists():
+        shutil.rmtree(output_dir)
+    output_dir.mkdir(parents=True)
+    shutil.copyfile(input_path, output_dir / "raw_trajectory.json")
+    fps = float(document["fps"])
+    write_raw_csv(output_dir / "raw_rpy.csv", trajectory, states, fps)
 
     rpy_series: dict[str, tuple[np.ndarray, np.ndarray]] = {}
     primary_start_sec = 0.0
     if measured is not None:
         _, measured_document, measured_trajectory, _ = measured
         measured_times, measured_start_sec = trajectory_times(
-            measured_document, measured_trajectory, args.measured_start_sec
+            measured_document, measured_trajectory, None
         )
         rpy_series["measured"] = (measured_times, measured_trajectory)
         if predicted is None:
@@ -578,47 +489,64 @@ def main() -> None:
     if predicted is not None:
         _, predicted_document, predicted_trajectory, _ = predicted
         predicted_times, predicted_start_sec = trajectory_times(
-            predicted_document, predicted_trajectory, args.predicted_start_sec
+            predicted_document, predicted_trajectory, None
         )
         rpy_series["predicted"] = (predicted_times, predicted_trajectory)
         primary_start_sec = predicted_start_sec
-    save_rpy_visualizations(segment_dir, rpy_series)
+    save_rpy_visualizations(output_dir, rpy_series)
 
-    save_plot(segment_dir / "rpy_velocity.png",
-              primary_start_sec + np.arange(1, len(trajectory)) / fps,
-              velocity, "angular velocity (rad/s)", "RPY Angular Velocity", states, fps,
-              primary_start_sec)
-    save_plot(segment_dir / "rpy_acceleration.png",
-              primary_start_sec + np.arange(2, len(trajectory)) / fps,
-              acceleration, "angular acceleration (rad/s²)", "RPY Angular Acceleration", states, fps,
-              primary_start_sec)
-    write_json_atomic(segment_dir / "summary.json", summary)
+    save_plot(
+        output_dir / "rpy_velocity.png",
+        primary_start_sec + np.arange(1, len(trajectory)) / fps,
+        velocity,
+        "angular velocity (rad/s)",
+        "RPY Angular Velocity",
+        states,
+        fps,
+        primary_start_sec,
+    )
+    save_plot(
+        output_dir / "rpy_acceleration.png",
+        primary_start_sec + np.arange(2, len(trajectory)) / fps,
+        acceleration,
+        "angular acceleration (rad/s²)",
+        "RPY Angular Acceleration",
+        states,
+        fps,
+        primary_start_sec,
+    )
+    write_json_atomic(output_dir / "summary.json", summary)
 
-    segment_config = {
-        "run_id": run_id,
-        "segment_id": segment_id,
-        "segment_index": segment_index,
-        "role": role,
-        "turn_id": args.turn_id,
-        "stream_id": args.stream_id,
-        "timestamp": timestamp,
-        "fps": fps,
-        "source": "algorithm",
-        "checkpoint": checkpoint,
-        "project_net_git_commit": net_commit,
-        "project_motor_git_commit": motor_commit,
-        "input_file": str(input_path),
-        "command": shlex.join([sys.executable, *sys.argv]),
-        "notes": args.notes,
-    }
-    write_json_atomic(segment_dir / "segment_config.json", segment_config)
-    run_config["segment_count"] = segment_count(run_dir)
-    write_json_atomic(run_config_path, run_config)
 
-    print_report(summary, trajectory, velocity)
-    print(f"\nRun ID: {run_id}")
-    print(f"Segment ID: {segment_id}")
-    print(f"Saved diagnostics to: {segment_dir}")
+def main() -> None:
+    args = parse_args()
+    project_root = find_project_root()
+    session_dir = resolve_session(args.session, project_root)
+    turns = discover_turns(session_dir)
+    if not turns:
+        raise ValueError(f"session has no valid turn directories: {session_dir / 'turns'}")
+
+    visualizations_dir = session_dir / "visualizations"
+    completed = 0
+    skipped = 0
+    print(f"[visualizer] session: {session_dir}")
+    print(f"[visualizer] discovered {len(turns)} turn(s)")
+    for turn_dir in turns:
+        output_dir = visualizations_dir / turn_dir.name
+        try:
+            process_turn(turn_dir, output_dir)
+        except Exception as exc:
+            skipped += 1
+            if output_dir.exists():
+                shutil.rmtree(output_dir)
+            print(f"[visualizer][warning] skip {turn_dir.name}: {type(exc).__name__}: {exc}")
+            continue
+        completed += 1
+        print(f"[visualizer] {turn_dir.name}: saved to {output_dir}")
+
+    print(f"[visualizer] complete: {completed} visualized, {skipped} skipped")
+    if completed == 0:
+        raise RuntimeError("session contains no visualizable turns")
 
 
 if __name__ == "__main__":

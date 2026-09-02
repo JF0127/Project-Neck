@@ -10,7 +10,7 @@ CVAE 模型：后验路径 loss + 先验采样指标：
     - 输出 json 到 <checkpoint 目录>/eval_<split>.json
 
 用法：
-    python models/neck_motion/eval.py --checkpoint .../best.pt [--split val] [--samples 10]
+    python neck_motion/eval.py --checkpoint .../best.pt [--split val] [--samples 10]
 """
 from __future__ import annotations
 
@@ -23,13 +23,13 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from models.neck_motion.cvae import build_model as build_model_any
-from models.neck_motion.dataset import ResponseNetDataset, collate_neck_motion
-from models.neck_motion.losses import NeckMotionLoss
-from models.neck_motion.metrics import aggregate_metrics, format_metrics, sample_metrics
-from models.neck_motion.text_features import Vocab
+from neck_motion.cvae import build_model as build_model_any
+from neck_motion.dataset import ResponseNetDataset, collate_neck_motion
+from neck_motion.losses import NeckMotionLoss
+from neck_motion.metrics import aggregate_metrics, format_metrics, sample_metrics
+from neck_motion.text_features import Vocab
 
 RAD2DEG = 180.0 / np.pi
 
@@ -183,7 +183,7 @@ def main() -> None:
 
 
 def _build_candidates_loss(cfg: dict):
-    from models.neck_motion.losses import MultiCandidateLoss
+    from neck_motion.losses import MultiCandidateLoss
     c = cfg.get("candidates", {})
     return MultiCandidateLoss(
         k=int(c.get("k", 8)),

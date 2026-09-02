@@ -18,9 +18,9 @@ from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from models.neck_motion.overlap_filter import compute_true_overlap, load_fragments, save_true_overlap
+from neck_motion.overlap_filter import compute_true_overlap, load_fragments, save_true_overlap
 
 def load_split_ids(data_root: Path) -> dict[str, set[str]]:
     """split -> utterance_id 集合（train/val/test.jsonl 中的样本去重）。"""

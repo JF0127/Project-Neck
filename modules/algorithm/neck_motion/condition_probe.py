@@ -32,12 +32,12 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from models.neck_motion.audio_features import load_audio_waveform_cached
-from models.neck_motion.overlap_filter import load_fragments, load_true_overlap, word_span_abs
-from models.neck_motion.rotations import relative_segment
-from models.neck_motion.text_features import Vocab, encode_word_timestamps
+from neck_motion.audio_features import load_audio_waveform_cached
+from neck_motion.overlap_filter import load_fragments, load_true_overlap, word_span_abs
+from neck_motion.rotations import relative_segment
+from neck_motion.text_features import Vocab, encode_word_timestamps
 
 TASKS = ["nod", "shake", "direction", "energy"]
 GROUPS = ["role_only", "audio", "text", "other", "full"]

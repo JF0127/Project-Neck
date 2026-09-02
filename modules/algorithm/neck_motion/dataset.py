@@ -18,9 +18,9 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from models.neck_motion.audio_features import load_audio_waveform, load_audio_waveform_cached
-from models.neck_motion.overlap_filter import load_true_overlap
-from models.neck_motion.text_features import (
+from neck_motion.audio_features import load_audio_waveform, load_audio_waveform_cached
+from neck_motion.overlap_filter import load_true_overlap
+from neck_motion.text_features import (
     START_OF_DIALOGUE,
     Vocab,
     encode_word_timestamps,
@@ -90,7 +90,7 @@ class ResponseNetDataset(Dataset):
         if self.true_overlap_path is None or not Path(self.true_overlap_path).exists():
             raise FileNotFoundError(
                 f"缺少 true_overlap 映射文件: {self.true_overlap_path}\n"
-                "请先运行: python models/neck_motion/analyze_overlap.py\n"
+                "请先运行: python neck_motion/analyze_overlap.py\n"
                 "（train.py 会在训练前自动生成该文件）"
             )
         return load_true_overlap(self.true_overlap_path)

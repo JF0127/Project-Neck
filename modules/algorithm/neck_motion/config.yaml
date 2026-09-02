@@ -4,7 +4,7 @@ data:
   data_root: data/source/response-net/processed_dataset
   # 过滤条件：真实语音重叠 true_overlap > 该阈值（秒）的 fragment 剔除。
   # true_overlap = 当前 fragment 实际词区间 ∩ 对方角色实际词区间 的交集总时长
-  # （不含窗口 0.3s/0.5s padding；由 models/neck_motion/overlap_filter.py 计算）。
+  # （不含窗口 0.3s/0.5s padding；由 neck_motion/overlap_filter.py 计算）。
   # 设置为 null / 0 表示不过滤。所有 split 使用同一判据，按 fragment 过滤。
   filter_overlap_sec: 0.1
   # true_overlap 映射文件（uid -> 秒）；缺失时 train.py 自动生成，不写原始数据目录。

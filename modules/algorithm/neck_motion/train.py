@@ -2,9 +2,9 @@
 """训练 / 验证 / dry-run 脚本（话语级颈部运动生成，第一版基线）。
 
 用法示例：
-    python models/neck_motion/train.py --dry-run
-    python models/neck_motion/train.py --config models/neck_motion/config.yaml --epochs 30
-    python models/neck_motion/train.py --resume outputs/neck_motion/checkpoints/last.pt
+    python neck_motion/train.py --dry-run
+    python neck_motion/train.py --config neck_motion/config.yaml --epochs 30
+    python neck_motion/train.py --resume outputs/neck_motion/checkpoints/last.pt
 
 - 自动选择 CUDA / MPS / CPU；固定随机种子；输出全部写入 outputs/neck_motion/，
   不污染原始数据目录。
@@ -31,22 +31,22 @@ import torch
 import yaml
 from torch.utils.data import DataLoader
 
-# 允许以 `python models/neck_motion/train.py` 方式运行
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+# 允许以 `python neck_motion/train.py` 方式运行
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from models.neck_motion.cvae import build_model as build_model_any
-from models.neck_motion.dataset import ResponseNetDataset, collate_neck_motion
-from models.neck_motion.losses import MultiCandidateLoss, NeckMotionLoss
-from models.neck_motion.metrics import (
+from neck_motion.cvae import build_model as build_model_any
+from neck_motion.dataset import ResponseNetDataset, collate_neck_motion
+from neck_motion.losses import MultiCandidateLoss, NeckMotionLoss
+from neck_motion.metrics import (
     aggregate_metrics,
     candidate_metrics,
     format_candidate_metrics,
     format_metrics,
     sample_metrics,
 )
-from models.neck_motion.model import build_neck_motion_model
-from models.neck_motion.overlap_filter import ensure_true_overlap
-from models.neck_motion.text_features import Vocab
+from neck_motion.model import build_neck_motion_model
+from neck_motion.overlap_filter import ensure_true_overlap
+from neck_motion.text_features import Vocab
 
 logger = logging.getLogger("neck_motion")
 

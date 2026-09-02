@@ -2,7 +2,7 @@
 """推理脚本：加载 checkpoint + 词表，对单个 fragment JSON 生成相对 RPY 轨迹。
 
 用法：
-    python models/neck_motion/infer.py --checkpoint outputs/neck_motion/checkpoints/best.pt \
+    python neck_motion/infer.py --checkpoint outputs/neck_motion/checkpoints/best.pt \
         --input sample.json --data-root data/source/response-net/processed_dataset
 
 输入 JSON（与训练样本结构兼容）：
@@ -40,12 +40,12 @@ from pathlib import Path
 import numpy as np
 import torch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from models.neck_motion.cvae import build_model as build_model_any
-from models.neck_motion.dataset import build_inference_batch
-from models.neck_motion.rotations import rpy_to_matrix as rpy_to_rotation_matrix
-from models.neck_motion.text_features import Vocab
+from neck_motion.cvae import build_model as build_model_any
+from neck_motion.dataset import build_inference_batch
+from neck_motion.rotations import rpy_to_matrix as rpy_to_rotation_matrix
+from neck_motion.text_features import Vocab
 
 
 def parse_args() -> argparse.Namespace:
@@ -76,7 +76,7 @@ def main() -> None:
     with open(args.input, "r", encoding="utf-8") as f:
         data = json.load(f)
 
-    from models.neck_motion.dataset import build_inference_batch
+    from neck_motion.dataset import build_inference_batch
     batch = build_inference_batch(data, vocab, data_root, int(cfg["data"]["target_sr"]))
     N = batch["num_frames"]
     fps = float(data.get("fps", 30.0))

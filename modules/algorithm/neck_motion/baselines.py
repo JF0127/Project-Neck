@@ -6,8 +6,8 @@
 RPY 轨迹；对 val 每个样本插值回其 N 帧。预测只依赖 role 与时长，不含音频/文本。
 
 用法：
-    python models/neck_motion/baselines.py
-    python models/neck_motion/baselines.py --threshold 0.1
+    python neck_motion/baselines.py
+    python neck_motion/baselines.py --threshold 0.1
 
 输出：outputs/neck_motion/overlap_analysis/baselines.json + 控制台报告。
 """
@@ -20,10 +20,10 @@ from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from models.neck_motion.dataset import ROLE_TO_ID
-from models.neck_motion.overlap_filter import load_fragments, load_true_overlap
+from neck_motion.dataset import ROLE_TO_ID
+from neck_motion.overlap_filter import load_fragments, load_true_overlap
 
 UNIFORM_LEN = 180  # 归一化时间轴上的采样帧数
 

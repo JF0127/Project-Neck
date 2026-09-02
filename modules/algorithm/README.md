@@ -3,7 +3,7 @@
 正式入口：
 
 ```bash
-.venv/bin/python -m algorithm_runtime --mock-neck
+.venv/bin/python -m runtime --mock-neck
 ```
 
 去掉 `--mock-neck` 后，轨迹 JSON 会发送到冻结接口

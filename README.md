@@ -1,6 +1,6 @@
 # Project-Neck 全链路运行与测试手册
 
-Project-Neck 是机器头语音交互、颈部动作生成和三电机执行的统一工程。本文只说明**当前代码真实可用**的启动入口、测试顺序和安全边界；旧 `tools/live/` L1 路径不是当前正式链路。
+Project-Neck 是机器头语音交互、颈部动作生成和三电机执行的统一工程。本文只说明**当前代码真实可用**的启动入口、测试顺序和安全边界。
 
 > **硬件警告：**`modules/motor/build/master_stack_test` 没有 mock/no-EtherCAT 模式。运行它会初始化真实 EtherCAT；向其 `/tmp/neck_model.sock` 发送合法轨迹可能立即驱动机器头。首次测试必须先走纯软件链路。
 
@@ -12,8 +12,10 @@ Project-Neck/
 │   ├── audio/       # 麦克风、扬声器、PCM WebSocket
 │   ├── algorithm/   # Algorithm Runtime、ASR、Dialogue、TTS、Neck Motion
 │   └── motor/       # trajectory parser、IK、电机轨迹、EtherCAT/CAN
-├── model/           # faster-whisper 模型
+├── models/
+│   └── whisper-base-ct2/  # faster-whisper 模型
 ├── experiments/     # 旁路实验记录
+├── tools/           # 项目级实验分析工具
 ├── AGENTS.md        # 全项目开发与安全约束
 └── README.md        # 本运行手册
 ```
@@ -64,7 +66,7 @@ Algorithm → Motor 的正式 JSON 固定为 30 fps、radian、`[roll,pitch,yaw]
 }
 ```
 
-不要将 `models/neck_motion/mvp.py --export-json` 的旧嵌套 JSON 直接发给当前 Motor parser。
+不要将 `neck_motion/mvp.py --export-json` 的旧嵌套 JSON 直接发给当前 Motor parser。
 
 ## 3. 机器与环境
 
@@ -108,11 +110,11 @@ Algorithm Runtime 还需要环境中存在：
 
 - v3 candidates checkpoint，默认：`modules/algorithm/outputs/neck_motion_v3/checkpoints/best.pt`
 - checkpoint 对应词表（由 checkpoint 的 `vocab_path` 指定）
-- faster-whisper 模型，默认：`Project-Neck/model/`
+- faster-whisper 模型，默认：`Project-Neck/models/whisper-base-ct2/`
 - torch、numpy、scipy、soundfile、faster-whisper、edge-tts 等依赖
 - edge-tts 可访问的网络
 
-当前仓库忽略 `modules/algorithm/outputs/` 和 `Project-Neck/model/`，干净 checkout 不包含这些部署资产。`requirements-runtime.txt` 目前也只补充 WebSocket 依赖，不能作为完整环境安装清单。
+当前仓库忽略 `modules/algorithm/outputs/` 和 `Project-Neck/models/whisper-base-ct2/`，干净 checkout 不包含这些部署资产。`requirements-runtime.txt` 目前也只补充 WebSocket 依赖，不能作为完整环境安装清单。
 
 Motor 当前 `main.cpp` 实际硬编码 EtherCAT 网卡为 `enp4s0`；`neck/neck_config.py` 中的 `network_interface` 尚未被入口读取。部署到其他主机时必须核对源码、网卡和重新编译，不能只改配置后假设生效。
 
@@ -199,7 +201,7 @@ python3 -m runtime.main stream-test \
 
 ```bash
 cd ~/projects/Project-Neck/modules/algorithm
-.venv/bin/python -m algorithm_runtime --mock-neck
+.venv/bin/python -m runtime --mock-neck
 ```
 
 `--mock-neck` 模式仍会真实执行：
@@ -217,7 +219,7 @@ cd ~/projects/Project-Neck/modules/algorithm
 常用部署覆盖：
 
 ```bash
-.venv/bin/python -m algorithm_runtime \
+.venv/bin/python -m runtime \
   --mock-neck \
   --host 0.0.0.0 --port 8765 \
   --checkpoint /path/to/best.pt \
@@ -232,7 +234,7 @@ cd ~/projects/Project-Neck/modules/algorithm
 
 ```bash
 cd ~/projects/Project-Neck/modules/algorithm
-.venv/bin/python -m algorithm_runtime --mock-neck
+.venv/bin/python -m runtime --mock-neck
 ```
 
 **Terminal B — Audio Computer**
@@ -308,7 +310,7 @@ python3 tools/model_socket_client.py <trajectory.json> \
 
 ### 协议验证与真实执行的区别
 
-- `modules/algorithm -m algorithm_runtime --mock-neck`：只在 Algorithm 侧验证最终 JSON，不连接 Motor，安全。
+- `modules/algorithm -m runtime --mock-neck`：只在 Algorithm 侧验证最终 JSON，不连接 Motor，安全。
 - `cmake --build build`：只编译，安全。
 - `tools/model_socket_client.py` 连接真实 Motor：可能执行硬件，不是纯协议检查。
 - 当前 Motor 没有独立 parser-only CLI、`--no-ethercat` 或 dry-run server。
@@ -335,7 +337,7 @@ sudo ./build/master_stack_test
 
 ```bash
 cd ~/projects/Project-Neck/modules/algorithm
-.venv/bin/python -m algorithm_runtime
+.venv/bin/python -m runtime
 ```
 
 这里故意不使用 `--mock-neck`。Runtime 会在每轮生成完整轨迹后连接 `/tmp/neck_model.sock`。
@@ -453,32 +455,20 @@ Session
 
 ## 13. 轨迹可视化
 
-工具位置：
+从项目根目录按 Session 批量分析：
 
 ```bash
-cd ~/projects/Project-Neck/modules/algorithm
+python3 tools/trajectory_visualizer.py session_<id>
 ```
 
-分析某次独立 listener generation：
+也可以直接传入 Session 路径：
 
 ```bash
-.venv/bin/python tools/trajectory_visualizer.py \
-  ../../experiments/v0_trajectory/sessions/<session-id>/turns/turn_001/model_generations/generation_001_listener.json \
-  --role listener
+python3 tools/trajectory_visualizer.py \
+  experiments/v0_trajectory/sessions/session_<id>
 ```
 
-分析整轮 `neck_rpy.json`：
-
-```bash
-.venv/bin/python tools/trajectory_visualizer.py \
-  ../../experiments/v0_trajectory/sessions/<session-id>/turns/turn_001/neck_rpy.json \
-  --role speaker \
-  --notes "full mixed-state turn; role is only the legacy output-directory label"
-```
-
-新的 `neck_rpy.json` 可直接读取；它包含混合 `listening/silent/speaking` states，因此当前可视化工具仍要求显式 `--role`，该参数只决定旧 `runs/segment_*` 输出目录标签，不改变输入 states 或分析结果。
-
-工具输出 roll/pitch/yaw position、velocity、acceleration 图和统计。目前它仍将衍生诊断写入旧 `experiments/v0_trajectory/runs/` 结构，不会修改 Session 原始记录。
+工具按 turn 编号处理所有可用 `neck_rpy.json` 和 `measured_rpy.json`，输出 roll/pitch/yaw position、velocity、acceleration 图和统计到对应 Session 的 `visualizations/turn_NNN/`。
 
 ## 14. 常见启动组合
 
@@ -495,7 +485,7 @@ python3 -m runtime.main capture-test --duration 5 --output capture.wav
 ```bash
 # Algorithm Computer
 cd ~/projects/Project-Neck/modules/algorithm
-.venv/bin/python -m algorithm_runtime --mock-neck
+.venv/bin/python -m runtime --mock-neck
 
 # Audio Computer
 cd ~/projects/Project-Neck/modules/audio
@@ -517,7 +507,7 @@ python3 -m runtime.main duplex-test \
 
 ```text
 1. modules/motor：sudo ./build/master_stack_test
-2. modules/algorithm：.venv/bin/python -m algorithm_runtime
+2. modules/algorithm：.venv/bin/python -m runtime
 3. modules/audio：duplex-test 或单轮 stream-test --wait-for-robot
 ```
 
