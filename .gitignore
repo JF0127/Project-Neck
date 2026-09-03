@@ -39,3 +39,6 @@ modules/motor/logs/audit_*/
 /models
 
 experiments/
+
+**/artifacts/
+artifacts/
