@@ -1,0 +1,10 @@
+-e .
+PyYAML>=6.0
+yt-dlp
+opencv-python>=4.8
+mediapipe>=0.10.14
+matplotlib>=3.7
+scipy>=1.10
+faster-whisper>=1.1
+scenedetect>=0.6.4
+ultralytics>=8.3

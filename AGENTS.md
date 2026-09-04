@@ -62,6 +62,10 @@ Motor 不得处理 ASR、TTS、文本、Dialogue 或模型推理。`states` 仅�
 
 > Algorithm 只关心“头应该如何运动”；Motor 只关心“如何把 RPY 变成真实电机运动”。
 
+### `dataset/`：离线数据集工程
+
+`dataset/` 是 Project-Neck 顶层独立的离线数据集生产系统，负责视频发现与下载、原始数据管理、数据清洗、fragment 构建、ASR/audio/MediaPipe/neck-pose 特征提取、dataset split、数据质量分析，并为 Algorithm Module 提供训练/验证/测试数据。它不属于机器人实时 runtime；实时模块仍位于 `modules/audio/`、`modules/algorithm/` 和 `modules/motor/`。具体数据集输出位于 `dataset/datasets/`。
+
 ### `experiments`
 
 `experiments/v0_trajectory/` 是旁路实验记录，不是 Runtime 数据总线。正式 Runtime 使用 Session → Turn → Motion Generation：Session 是一次完整测试，Turn 是一轮交互，Generation 是一次独立模型轨迹生成；旧 `runs/run_*/segment_*` 手动诊断数据继续保留。v0 轻量保存原始 generation、整轮 final RPY，以及后续 processed RPY、position/velocity/acceleration 图、对比图和简单参数即可。

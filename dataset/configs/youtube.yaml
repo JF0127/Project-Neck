@@ -1,0 +1,23 @@
+search:
+  query: "主播说联播"
+  limit: 100
+
+filter:
+  title_keyword: "主播说联播"
+
+output:
+  candidates: "datasets/zhubo_shuo_lianbo/metadata/discovery/candidates.jsonl"
+
+validation:
+  candidates: "datasets/zhubo_shuo_lianbo/metadata/discovery/candidates.jsonl"
+  validated: "datasets/zhubo_shuo_lianbo/metadata/validation/validated.jsonl"
+  rejected: "datasets/zhubo_shuo_lianbo/metadata/validation/rejected.jsonl"
+  preview: "datasets/zhubo_shuo_lianbo/metadata/validation/validation_preview.txt"
+  title_keyword: "主播说联播"
+  allowed_channels:
+    - "CCTV中国中央电视台"
+    - "CCTV春晚"
+
+download:
+  validated: "datasets/zhubo_shuo_lianbo/metadata/validation/validated.jsonl"
+  dataset_root: "datasets/zhubo_shuo_lianbo"

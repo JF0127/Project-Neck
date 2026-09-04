@@ -1,44 +1,114 @@
 # ================= Project-Neck 根 .gitignore =================
-# 覆盖两个子项目：modules/algorithm（模型端）与 modules/motor（实机端）。
-# 原则：只入库源码/配置/文档/测试，不入库数据、虚拟环境与可再生成产物。
+# Git 提交源码、配置、文档和测试；本地数据与可再生成产物只保留在工作区。
 
-# ---------------- 通用 ----------------
+# ============================================================
+# Python
+# ============================================================
+
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+.venv/
+venv/
+env/
+
+.coverage
+htmlcov/
+
+# ============================================================
+# OS / IDE
+# ============================================================
+
 .DS_Store
 Thumbs.db
-*.pyc
-__pycache__/
-*.egg-info/
-.ipynb_checkpoints/
-.idea/
+
 .vscode/
+.idea/
+
 *.swp
+*.swo
 *~
+.ipynb_checkpoints/
 
-# ---------------- modules/algorithm：虚拟环境与缓存 ----------------
-modules/algorithm/.venv/
-modules/algorithm/.pytest_cache/
+# ============================================================
+# Dataset artifacts
+# ============================================================
 
-# ---------------- modules/algorithm：数据集（6.3G，只读，严禁入库） ----------------
-modules/algorithm/data/
+# Generated videos, metadata, features, fragments, splits and analysis.
+/dataset/datasets/*
+!/dataset/datasets/.gitkeep
 
-# ---------------- modules/algorithm：训练/推理产物（1.4G，可重新生成） ----------------
-# 包含各版本 checkpoint(约 65M/个)、mvp 轨迹 npy/json、审计 json 等。
-# 如需把 v3 冻结模型入库，可强制添加：
-#   git add -f modules/algorithm/outputs/neck_motion_v3/checkpoints/best.pt
-modules/algorithm/outputs/
+# ============================================================
+# Downloaded dataset models
+# ============================================================
 
-# ---------------- modules/motor：构建产物 ----------------
-modules/motor/build/
+/dataset/models/*
+!/dataset/models/.gitkeep
+
+# Runtime Whisper models are also downloaded locally.
+/models/
+
+# ============================================================
+# Algorithm data and training outputs
+# ============================================================
+
+/modules/algorithm/data/
+/modules/algorithm/outputs/*
+!/modules/algorithm/outputs/.gitkeep
+
+# ============================================================
+# Build artifacts
+# ============================================================
+
+/board/xiaozhi-esp32/build/
+/modules/motor/build/
+
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
 *.o
 *.a
 
-# ---------------- modules/motor：审计落盘（保留日志文档 logs/*.md） ----------------
-modules/motor/logs/audit_*/
+# ============================================================
+# Motor audit artifacts
+# ============================================================
 
-# ---------------- whisper 模型(145MB, 可从 hf-mirror 重新下载) ----------------
-/models
+/modules/motor/logs/audit_*/
 
-experiments/
+# ============================================================
+# Experiment artifacts
+# ============================================================
+
+# Keep experiment scripts, README files and configs trackable.
+/experiments/*/runs/*
+/experiments/*/sessions/*
+
+# ============================================================
+# Runtime recordings
+# ============================================================
+
+/modules/audio/recordings/*
+!/modules/audio/recordings/.gitkeep
+
+# ============================================================
+# Common media artifacts
+# ============================================================
+
+*.mp4
+*.mov
+*.mkv
+*.avi
+
+# ============================================================
+# Other generated artifacts
+# ============================================================
 
 **/artifacts/
 artifacts/

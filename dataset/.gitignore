@@ -1,0 +1,6 @@
+# Local dataset-project environment and generated Python artifacts.
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/

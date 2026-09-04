@@ -12,6 +12,10 @@ Project-Neck/
 │   ├── audio/       # 麦克风、扬声器、PCM WebSocket
 │   ├── algorithm/   # Algorithm Runtime、ASR、Dialogue、TTS、Neck Motion
 │   └── motor/       # trajectory parser、IK、电机轨迹、EtherCAT/CAN
+├── dataset/         # 离线数据集采集、处理与构建
+│   ├── src/         # crawler、cleaning、features、fragments、splits
+│   ├── tests/
+│   └── datasets/zhubo_shuo_lianbo/
 ├── models/
 │   └── whisper-base-ct2/  # faster-whisper 模型
 ├── experiments/     # 旁路实验记录
@@ -25,6 +29,11 @@ Project-Neck/
 | `modules/audio` | 麦克风采集、扬声器播放、有界 Audio Queue、16 kHz PCM WebSocket 收发 |
 | `modules/algorithm` | Algorithm Runtime、整段 ASR、fixed/echo Dialogue、TTS、listener/speaker motion generation、最终 RPY trajectory |
 | `modules/motor` | 扁平 trajectory JSON parser、radian→degree、IK、位置/速度 precheck、三电机轨迹执行、EtherCAT/CAN |
+| `dataset` | 离线视频发现/下载、清洗、特征与 fragment 构建、split、质量分析；不参与实时运行 |
+
+### `dataset/`：离线数据集工程
+
+`dataset/` 是 Project-Neck 的独立离线数据集生产系统，负责视频发现与下载、原始数据管理、数据清洗、fragment 构建、ASR/audio/MediaPipe/neck-pose 特征提取、数据集 split、数据质量分析，并为 Algorithm Module 提供训练/验证/测试数据。它不属于机器人实时 runtime；实时模块仍位于 `modules/audio/`、`modules/algorithm/` 和 `modules/motor/`。当前具体数据集位于 `dataset/datasets/zhubo_shuo_lianbo/`。
 
 ## 2. 当前整体链路
 
