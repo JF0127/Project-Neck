@@ -5,8 +5,6 @@ import io
 from dataclasses import dataclass
 
 import numpy as np
-import soundfile as sf
-from scipy.signal import resample_poly
 
 from .asr import WordTimestamp
 
@@ -32,6 +30,8 @@ class EdgeTTS:
 
     async def synthesize(self, text: str) -> TTSResult:
         import edge_tts
+        import soundfile as sf
+        from scipy.signal import resample_poly
 
         audio_chunks: list[bytes] = []
         words: list[WordTimestamp] = []

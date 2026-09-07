@@ -12,7 +12,7 @@ import threading
 import time
 from typing import Any, Sequence
 
-DEFAULT_ROOT = Path(__file__).resolve().parents[3] / "experiments/v0_trajectory"
+DEFAULT_ROOT = Path(__file__).resolve().parent / "experiments/v0_trajectory"
 _SAFE_NAME = re.compile(r"[^A-Za-z0-9_-]+")
 
 

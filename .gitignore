@@ -1,10 +1,4 @@
-# ================= Project-Neck 根 .gitignore =================
-# Git 提交源码、配置、文档和测试；本地数据与可再生成产物只保留在工作区。
-
-# ============================================================
 # Python
-# ============================================================
-
 __pycache__/
 *.py[cod]
 *.pyo
@@ -13,62 +7,46 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
-
 .venv/
 venv/
 env/
-
 .coverage
 htmlcov/
 
-# ============================================================
-# OS / IDE
-# ============================================================
-
+# OS / editors
 .DS_Store
 Thumbs.db
-
 .vscode/
 .idea/
-
 *.swp
 *.swo
 *~
 .ipynb_checkpoints/
 
-# ============================================================
-# Dataset artifacts
-# ============================================================
-
-# Generated videos, metadata, features, fragments, splits and analysis.
+# Dataset: generated data and downloaded models
 /dataset/datasets/*
 !/dataset/datasets/.gitkeep
-
-# ============================================================
-# Downloaded dataset models
-# ============================================================
-
 /dataset/models/*
 !/dataset/models/.gitkeep
 
-# Runtime Whisper models are also downloaded locally.
-/models/
+# Algorithm: future local training outputs and checkpoints
+/algorithm/outputs/
+*.pt
+*.pth
+*.ckpt
 
-# ============================================================
-# Algorithm data and training outputs
-# ============================================================
+# Runtime deployment assets and generated records
+/runtime/models/*
+!/runtime/models/.gitkeep
+/runtime/experiments/*
+!/runtime/experiments/.gitkeep
+/runtime/audio/recordings/*
+!/runtime/audio/recordings/.gitkeep
+/runtime/motor/logs/audit_*/
 
-/modules/algorithm/data/
-/modules/algorithm/outputs/*
-!/modules/algorithm/outputs/.gitkeep
-
-# ============================================================
 # Build artifacts
-# ============================================================
-
-/board/xiaozhi-esp32/build/
-/modules/motor/build/
-
+/runtime/audio/board/xiaozhi-esp32/build/
+/runtime/motor/build/
 CMakeFiles/
 CMakeCache.txt
 cmake_install.cmake
@@ -76,39 +54,12 @@ compile_commands.json
 *.o
 *.a
 
-# ============================================================
-# Motor audit artifacts
-# ============================================================
-
-/modules/motor/logs/audit_*/
-
-# ============================================================
-# Experiment artifacts
-# ============================================================
-
-# Keep experiment scripts, README files and configs trackable.
-/experiments/*/runs/*
-/experiments/*/sessions/*
-
-# ============================================================
-# Runtime recordings
-# ============================================================
-
-/modules/audio/recordings/*
-!/modules/audio/recordings/.gitkeep
-
-# ============================================================
-# Common media artifacts
-# ============================================================
-
+# Common generated media
 *.mp4
 *.mov
 *.mkv
 *.avi
 
-# ============================================================
 # Other generated artifacts
-# ============================================================
-
 **/artifacts/
 artifacts/

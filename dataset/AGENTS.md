@@ -2,7 +2,7 @@
 
 > 本文件面向 Codex、Coding Agent、Research Agent 和后续自动化任务。它不是普通用户教程，而是当前仓库的权威数据导航与安全边界。开始任何任务前先阅读本文件；若文档、代码和实际 artifact 出现冲突，应停止并核对，不能静默猜测或重算数据。
 
-`dataset/` 是 Project-Neck 的离线数据集生产系统，不属于机器人实时 runtime。它负责视频发现与下载、原始数据管理、数据清洗、fragment 构建、ASR/audio/MediaPipe/neck-pose 特征提取、split、数据质量分析，并为 Algorithm Module 提供训练/验证/测试数据。机器人实时模块仍位于 `modules/audio/`、`modules/algorithm/` 和 `modules/motor/`。
+`dataset/` 是 Project-Neck 的独立离线数据集生产系统，不属于机器人实时 Runtime。它负责视频发现与下载、原始数据管理、数据清洗、fragment 构建、ASR/audio/MediaPipe/neck-pose 特征提取、split、数据质量分析，并向顶层 `algorithm/` 发布训练/验证/测试数据。机器人在线系统统一位于顶层 `runtime/`。
 
 ## 1. 项目定位
 

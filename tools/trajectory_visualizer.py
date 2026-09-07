@@ -268,7 +268,7 @@ def analyze(document: dict, trajectory: np.ndarray, states: list[str] | None) ->
 def find_project_root() -> Path:
     """Locate Project-Neck from this script, without depending on the caller cwd."""
     project_root = Path(__file__).resolve().parents[1]
-    if not (project_root / "modules/algorithm").is_dir():
+    if not (project_root / "runtime").is_dir():
         raise RuntimeError("cannot locate Project-Neck root from trajectory_visualizer.py")
     return project_root
 
@@ -279,7 +279,7 @@ def resolve_session(value: str, project_root: Path) -> Path:
     if not requested.is_absolute():
         candidates.extend([
             project_root / requested,
-            project_root / "experiments/v0_trajectory/sessions" / requested,
+            project_root / "runtime/experiments/v0_trajectory/sessions" / requested,
         ])
     for candidate in candidates:
         if candidate.is_dir():
@@ -417,7 +417,7 @@ def parse_args() -> argparse.Namespace:
             "examples:\n"
             "  python3 tools/trajectory_visualizer.py session_20260902_003\n"
             "  python3 tools/trajectory_visualizer.py "
-            "experiments/v0_trajectory/sessions/session_20260902_003"
+            "runtime/experiments/v0_trajectory/sessions/session_20260902_003"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )

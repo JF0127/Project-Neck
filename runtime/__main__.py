@@ -5,19 +5,15 @@ import argparse
 import asyncio
 from pathlib import Path
 
-from .audio_server import AudioWebSocketServer
-from .dialogue import EchoDialogue, FixedDialogue
-from .experiment_logger import DEFAULT_ROOT, ExperimentLogger
-from .motion import FPS
-from .runtime import AlgorithmRuntime
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_CHECKPOINT = PROJECT_ROOT / "outputs/neck_motion_v3/checkpoints/best.pt"
-DEFAULT_WHISPER = PROJECT_ROOT.parents[1] / "models/whisper-base-ct2"
+RUNTIME_ROOT = Path(__file__).resolve().parent
+DEFAULT_CHECKPOINT = RUNTIME_ROOT / "models/neck_motion_v3/checkpoints/best.pt"
+DEFAULT_WHISPER = RUNTIME_ROOT / "models/whisper-base-ct2"
+DEFAULT_EXPERIMENT_ROOT = RUNTIME_ROOT / "experiments/v0_trajectory"
+TRAJECTORY_FPS = 30.0
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Algorithm Runtime V1")
+    parser = argparse.ArgumentParser(description="Project-Neck Robot Runtime V1")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--checkpoint", default=str(DEFAULT_CHECKPOINT))
@@ -43,7 +39,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-candidates", type=int, default=8)
     parser.add_argument(
         "--experiment-root",
-        default=str(DEFAULT_ROOT),
+        default=str(DEFAULT_EXPERIMENT_ROOT),
         help="v0 trajectory experiment root",
     )
     parser.add_argument(
@@ -56,6 +52,13 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+
+    # Keep ``python -m runtime --help`` usable without loading deployment dependencies.
+    from .audio_server import AudioWebSocketServer
+    from .dialogue import EchoDialogue, FixedDialogue
+    from .experiment_logger import ExperimentLogger
+    from .runtime import AlgorithmRuntime
+
     dialogue = EchoDialogue() if args.dialogue == "echo" else FixedDialogue(args.fixed_reply)
     experiment_logger = None
     if not args.no_experiment_log:
@@ -63,7 +66,7 @@ def main() -> None:
             experiment_logger = ExperimentLogger(
                 checkpoint=args.checkpoint,
                 runtime_mode="mock-neck" if args.mock_neck else "motor-socket",
-                trajectory_fps=FPS,
+                trajectory_fps=TRAJECTORY_FPS,
                 root=args.experiment_root,
             )
         except Exception as exc:

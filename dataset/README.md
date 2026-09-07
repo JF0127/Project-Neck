@@ -1,6 +1,6 @@
 # Project-Neck Dataset
 
-`dataset/` is Project-Neck's offline dataset production subsystem. It is separate from the robot's real-time runtime; the online system remains under `modules/audio/`, `modules/algorithm/`, and `modules/motor/`.
+`dataset/` is Project-Neck's independent offline dataset production subsystem. It publishes canonical data artifacts for `algorithm/`; online robot integration lives under `runtime/`.
 
 It is responsible for:
 
