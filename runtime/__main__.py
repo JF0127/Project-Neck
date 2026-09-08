@@ -1,143 +1,134 @@
-"""CLI entry: python -m runtime."""
+"""CLI entry for the Stage 3 voice Runtime: ``python -m runtime``."""
 from __future__ import annotations
 
 import argparse
 import asyncio
 from pathlib import Path
-
-from .dialogue import (
-    DEEPSEEK_BASE_URL,
-    DEEPSEEK_MODEL,
-    DEFAULT_HISTORY_TURNS,
-    DEFAULT_TIMEOUT_SEC,
-    DeepSeekDialogue,
-    DialogueError,
-    EchoDialogue,
-    FixedDialogue,
-)
+from typing import Any
 
 RUNTIME_ROOT = Path(__file__).resolve().parent
-DEFAULT_WHISPER = RUNTIME_ROOT / "models/whisper-base-ct2"
-DEFAULT_EXPERIMENT_ROOT = RUNTIME_ROOT / "experiments/v0_trajectory"
-TRAJECTORY_FPS = 30.0
+DEFAULT_CONFIG = RUNTIME_ROOT / "config.yaml"
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Project-Neck Robot Runtime V1")
-    parser.add_argument("--host", default="0.0.0.0")
-    parser.add_argument("--port", type=int, default=8765)
+    parser = argparse.ArgumentParser(description="Project-Neck voice Runtime")
     parser.add_argument(
-        "--baseline-checkpoint",
-        required=True,
-        help="Algorithm Baseline V1 best.pt checkpoint",
-    )
-    parser.add_argument("--whisper-model", default=str(DEFAULT_WHISPER))
-    parser.add_argument("--asr-device", choices=["cpu", "cuda"], default="cpu")
-    parser.add_argument(
-        "--motion-device", choices=["auto", "cpu", "cuda"], default="auto"
-    )
-    parser.add_argument("--language", default="en", help="Whisper language; use 'auto' for detection")
-    parser.add_argument("--tts-voice", default="en-US-GuyNeural")
-    parser.add_argument(
-        "--dialogue", choices=["deepseek", "fixed", "echo"], default="fixed"
-    )
-    parser.add_argument(
-        "--fixed-reply",
-        default="I heard you. Thank you for talking with me.",
-    )
-    parser.add_argument("--deepseek-model", default=DEEPSEEK_MODEL)
-    parser.add_argument("--deepseek-base-url", default=DEEPSEEK_BASE_URL)
-    parser.add_argument(
-        "--dialogue-history-turns", type=int, default=DEFAULT_HISTORY_TURNS
-    )
-    parser.add_argument(
-        "--dialogue-timeout", type=float, default=DEFAULT_TIMEOUT_SEC
-    )
-    parser.add_argument("--neck-socket", default="/tmp/neck_model.sock")
-    parser.add_argument(
-        "--neck-measurement-socket", default="/tmp/neck_measurement.sock"
-    )
-    parser.add_argument(
-        "--mock-neck",
-        action="store_true",
-        help="validate and print Neck JSON without connecting to the motor process",
-    )
-    parser.add_argument(
-        "--experiment-root",
-        default=str(DEFAULT_EXPERIMENT_ROOT),
-        help="v0 trajectory experiment root",
-    )
-    parser.add_argument(
-        "--no-experiment-log",
-        action="store_true",
-        help="disable best-effort Session/Turn experiment records",
+        "--config",
+        type=Path,
+        default=DEFAULT_CONFIG,
+        help="Runtime YAML config path",
     )
     return parser.parse_args()
 
 
-def build_dialogue(args: argparse.Namespace):
-    if args.dialogue == "deepseek":
-        return DeepSeekDialogue(
-            model=args.deepseek_model,
-            base_url=args.deepseek_base_url,
-            history_turns=args.dialogue_history_turns,
-            timeout_sec=args.dialogue_timeout,
-        )
-    if args.dialogue == "echo":
-        return EchoDialogue()
-    return FixedDialogue(args.fixed_reply)
+def _section(config: dict[str, Any], name: str) -> dict[str, Any]:
+    value = config.get(name, {})
+    if not isinstance(value, dict):
+        raise ValueError(f"config section {name!r} must be a mapping")
+    return value
+
+
+def _required(section: dict[str, Any], name: str, section_name: str) -> Any:
+    if name not in section:
+        raise ValueError(f"config field {section_name}.{name} is required")
+    return section[name]
+
+
+def _model_path(config_path: Path, value: Any) -> Path:
+    path = Path(str(value)).expanduser()
+    if not path.is_absolute():
+        path = config_path.parent / path
+    return path.resolve()
+
+
+def load_config(path: Path) -> tuple[dict[str, Any], Path]:
+    try:
+        import yaml
+    except ImportError as exc:
+        raise RuntimeError("PyYAML is required to read runtime/config.yaml") from exc
+
+    config_path = path.expanduser().resolve()
+    with config_path.open("r", encoding="utf-8") as handle:
+        value = yaml.safe_load(handle)
+    if not isinstance(value, dict):
+        raise ValueError("Runtime config root must be a mapping")
+    return value, config_path
+
+
+def build_runtime(config: dict[str, Any], config_path: Path):
+    from .asr import WhisperASR
+    from .dialogue import DeepSeekDialogue
+    from .runtime import Runtime
+    from .tts import EdgeTTS
+    from .vad import SileroVAD
+
+    audio = _section(config, "audio")
+    vad_config = _section(config, "vad")
+    asr_config = _section(config, "asr")
+    dialogue_config = _section(config, "dialogue")
+    tts_config = _section(config, "tts")
+    runtime_config = _section(config, "runtime")
+
+    if vad_config.get("backend") != "silero":
+        raise ValueError("Stage 3 requires vad.backend=silero")
+    if asr_config.get("backend") != "whisper":
+        raise ValueError("Stage 3 requires asr.backend=whisper")
+    if dialogue_config.get("backend") != "deepseek":
+        raise ValueError("Stage 3 requires dialogue.backend=deepseek")
+    if tts_config.get("backend") != "edge":
+        raise ValueError("Stage 3 requires tts.backend=edge")
+
+    vad = SileroVAD(
+        model_path=_model_path(
+            config_path, _required(vad_config, "model_path", "vad")
+        ),
+        threshold=float(vad_config.get("threshold", 0.5)),
+        min_speech_ms=int(vad_config.get("min_speech_ms", 250)),
+        min_silence_ms=int(vad_config.get("min_silence_ms", 500)),
+    )
+    language = asr_config.get("language", "en")
+    asr = WhisperASR(
+        model_path=str(
+            _model_path(config_path, _required(asr_config, "model_path", "asr"))
+        ),
+        device=str(asr_config.get("device", "cpu")),
+        language=None if language == "auto" else str(language),
+    )
+    dialogue = DeepSeekDialogue(
+        model=str(_required(dialogue_config, "model", "dialogue")),
+        base_url=str(_required(dialogue_config, "base_url", "dialogue")),
+        timeout_sec=float(dialogue_config.get("timeout_sec", 30.0)),
+        temperature=float(dialogue_config.get("temperature", 0.7)),
+    )
+    tts = EdgeTTS(voice=str(tts_config.get("voice", "en-US-GuyNeural")))
+    runtime = Runtime(
+        vad=vad,
+        asr=asr,
+        dialogue=dialogue,
+        tts=tts,
+        dialogue_fallback_text=str(
+            _required(runtime_config, "dialogue_fallback_text", "runtime")
+        ),
+        cooldown_ms=int(runtime_config.get("cooldown_ms", 200)),
+    )
+    return runtime, str(audio.get("host", "0.0.0.0")), int(audio.get("port", 8765))
 
 
 def main() -> None:
     args = parse_args()
-
-    # Validate dialogue credentials before loading large deployment dependencies.
     try:
-        dialogue = build_dialogue(args)
-    except DialogueError as exc:
+        config, config_path = load_config(args.config)
+        runtime, host, port = build_runtime(config, config_path)
+    except Exception as exc:
         raise SystemExit(f"runtime: error: {exc}") from None
 
-    # Keep ``python -m runtime --help`` usable without loading deployment dependencies.
     from .audio_server import AudioWebSocketServer
-    from .experiment_logger import ExperimentLogger
-    from .runtime import AlgorithmRuntime
 
-    experiment_logger = None
-    if not args.no_experiment_log:
-        try:
-            experiment_logger = ExperimentLogger(
-                checkpoint=args.baseline_checkpoint,
-                runtime_mode="mock-neck" if args.mock_neck else "motor-socket",
-                trajectory_fps=TRAJECTORY_FPS,
-                root=args.experiment_root,
-            )
-        except Exception as exc:
-            print(
-                f"[runtime][experiment][warning] cannot start session: "
-                f"{type(exc).__name__}: {exc}"
-            )
-
+    server = AudioWebSocketServer(runtime, host=host, port=port)
     try:
-        runtime = AlgorithmRuntime(
-            baseline_checkpoint=args.baseline_checkpoint,
-            whisper_model=args.whisper_model,
-            dialogue=dialogue,
-            tts_voice=args.tts_voice,
-            asr_device=args.asr_device,
-            motion_device=args.motion_device,
-            asr_language=None if args.language == "auto" else args.language,
-            neck_socket=args.neck_socket,
-            neck_measurement_socket=args.neck_measurement_socket,
-            mock_neck=args.mock_neck,
-            experiment_logger=experiment_logger,
-        )
-        server = AudioWebSocketServer(runtime, host=args.host, port=args.port)
         asyncio.run(server.serve_forever())
     except KeyboardInterrupt:
         print("[runtime] stopped")
-    finally:
-        if experiment_logger is not None:
-            experiment_logger.end_session()
 
 
 if __name__ == "__main__":

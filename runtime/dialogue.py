@@ -1,15 +1,18 @@
-"""Small replaceable dialogue backends for Runtime V1."""
+"""Stateless DeepSeek dialogue backend for the new Runtime."""
 from __future__ import annotations
 
+import math
 import os
 import time
-from typing import Any, Callable, Protocol
+from typing import Any, Callable
+
+from .contracts import DialogueRequest
 
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 DEEPSEEK_MODEL = "deepseek-v4-flash"
-DEFAULT_HISTORY_TURNS = 5
 DEFAULT_MAX_TOKENS = 128
 DEFAULT_TIMEOUT_SEC = 30.0
+DEFAULT_TEMPERATURE = 0.7
 
 DEFAULT_SYSTEM_PROMPT = """你是一个自然的人形机器人对话助手。默认使用中文回答；如果用户明确使用其他语言并希望以该语言交流，可以自然响应。请使用自然、简洁、适合口语表达的回答，通常只回答一到三句话。除非用户明确要求详细解释，否则不要长篇回答。不要使用 Markdown、列表、标题、代码块或复杂排版。回答将直接交给语音合成系统播放，因此应像真实口语交流。"""
 
@@ -18,40 +21,22 @@ class DialogueError(RuntimeError):
     """A dialogue backend could not produce valid robot text."""
 
 
-class DialoguePolicy(Protocol):
-    def reply(self, user_text: str) -> str: ...
-
-
 class FixedDialogue:
-    backend = "fixed"
-    model = None
+    """Small deterministic backend for pure-software tests."""
 
-    def __init__(self, reply_text: str = "I heard you. Thank you for talking with me."):
-        self.reply_text = reply_text
+    def __init__(self, reply_text: str = "I heard you.") -> None:
+        if not reply_text.strip():
+            raise ValueError("fixed dialogue reply must not be empty")
+        self.reply_text = reply_text.strip()
 
-    @property
-    def metadata(self) -> dict[str, Any]:
-        return {"backend": self.backend, "model": self.model}
-
-    def reply(self, user_text: str) -> str:
+    def reply(self, request: DialogueRequest) -> str:
+        if not isinstance(request, DialogueRequest):
+            raise TypeError("FixedDialogue.reply requires DialogueRequest")
         return self.reply_text
 
 
-class EchoDialogue:
-    backend = "echo"
-    model = None
-
-    @property
-    def metadata(self) -> dict[str, Any]:
-        return {"backend": self.backend, "model": self.model}
-
-    def reply(self, user_text: str) -> str:
-        clean = user_text.strip()
-        return f"You said: {clean}" if clean else "I could not hear any speech."
-
-
 class DeepSeekDialogue:
-    """Synchronous OpenAI-compatible DeepSeek client with short in-process history."""
+    """Synchronous OpenAI-compatible client with request-owned history."""
 
     backend = "deepseek"
     thinking_mode = "disabled"
@@ -60,9 +45,9 @@ class DeepSeekDialogue:
         self,
         model: str = DEEPSEEK_MODEL,
         base_url: str = DEEPSEEK_BASE_URL,
-        history_turns: int = DEFAULT_HISTORY_TURNS,
         timeout_sec: float = DEFAULT_TIMEOUT_SEC,
         max_tokens: int = DEFAULT_MAX_TOKENS,
+        temperature: float = DEFAULT_TEMPERATURE,
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
         client: Any | None = None,
         client_factory: Callable[..., Any] | None = None,
@@ -74,12 +59,12 @@ class DeepSeekDialogue:
             raise ValueError("DeepSeek model must not be empty")
         if not base_url.strip():
             raise ValueError("DeepSeek base_url must not be empty")
-        if history_turns < 1:
-            raise ValueError("history_turns must be at least 1")
         if timeout_sec <= 0.0:
             raise ValueError("timeout_sec must be greater than zero")
         if max_tokens < 1:
             raise ValueError("max_tokens must be at least 1")
+        if not math.isfinite(temperature) or not 0.0 <= temperature <= 2.0:
+            raise ValueError("temperature must be finite and between 0 and 2")
         if not system_prompt.strip():
             raise ValueError("system_prompt must not be empty")
         if client is not None and client_factory is not None:
@@ -87,11 +72,10 @@ class DeepSeekDialogue:
 
         self.model = model.strip()
         self.base_url = base_url.rstrip("/")
-        self.history_turns = int(history_turns)
         self.timeout_sec = float(timeout_sec)
         self.max_tokens = int(max_tokens)
+        self.temperature = float(temperature)
         self.system_prompt = system_prompt.strip()
-        self._history: list[tuple[str, str]] = []
         self._last_metadata: dict[str, Any] = {
             "backend": self.backend,
             "model": self.model,
@@ -109,7 +93,6 @@ class DeepSeekDialogue:
                         "openai package is required for dialogue=deepseek"
                     ) from exc
                 client_factory = OpenAI
-            # Disable SDK retries so a real-time turn has one bounded API attempt.
             self._client = client_factory(
                 api_key=api_key,
                 base_url=self.base_url,
@@ -120,7 +103,7 @@ class DeepSeekDialogue:
     def __repr__(self) -> str:
         return (
             f"DeepSeekDialogue(model={self.model!r}, base_url={self.base_url!r}, "
-            f"history_turns={self.history_turns}, timeout_sec={self.timeout_sec})"
+            f"timeout_sec={self.timeout_sec}, temperature={self.temperature})"
         )
 
     @property
@@ -130,12 +113,12 @@ class DeepSeekDialogue:
             result["usage"] = dict(result["usage"])
         return result
 
-    @property
-    def history_messages(self) -> list[dict[str, str]]:
+    def _messages(self, request: DialogueRequest) -> list[dict[str, str]]:
         messages = [{"role": "system", "content": self.system_prompt}]
-        for user_text, assistant_text in self._history:
-            messages.append({"role": "user", "content": user_text})
-            messages.append({"role": "assistant", "content": assistant_text})
+        for turn in tuple(request.history)[-10:]:
+            messages.append({"role": "user", "content": turn.user_text})
+            messages.append({"role": "assistant", "content": turn.robot_text})
+        messages.append({"role": "user", "content": request.user_text.strip()})
         return messages
 
     @staticmethod
@@ -172,62 +155,39 @@ class DeepSeekDialogue:
                 result[field] = value
         return result
 
-    def reply(self, user_text: str) -> str:
-        clean_user_text = user_text.strip()
-        if not clean_user_text:
+    def reply(self, request: DialogueRequest) -> str:
+        if not isinstance(request, DialogueRequest):
+            raise TypeError("DeepSeekDialogue.reply requires DialogueRequest")
+        if not request.user_text.strip():
             raise DialogueError("DeepSeek dialogue requires non-empty user text")
 
-        messages = self.history_messages
-        messages.append({"role": "user", "content": clean_user_text})
         started = time.monotonic()
         try:
             response = self._client.chat.completions.create(
                 model=self.model,
-                messages=messages,
+                messages=self._messages(request),
                 max_tokens=self.max_tokens,
-                # DeepSeek's OpenAI-compatible API requires custom parameters in
-                # extra_body. This explicitly selects low-latency non-thinking mode.
+                temperature=self.temperature,
                 extra_body={"thinking": {"type": "disabled"}},
                 timeout=self.timeout_sec,
             )
         except Exception as exc:
-            latency = time.monotonic() - started
             self._last_metadata = {
                 "backend": self.backend,
                 "model": self.model,
                 "thinking_mode": self.thinking_mode,
-                "latency_sec": latency,
+                "latency_sec": time.monotonic() - started,
                 "status": "error",
             }
             raise self._request_error(exc) from exc
 
         latency = time.monotonic() - started
         try:
-            choices = response.choices
-            content = choices[0].message.content
+            content = response.choices[0].message.content
         except (AttributeError, IndexError, TypeError) as exc:
-            self._last_metadata = {
-                "backend": self.backend,
-                "model": self.model,
-                "thinking_mode": self.thinking_mode,
-                "latency_sec": latency,
-                "status": "invalid_response",
-            }
             raise DialogueError("DeepSeek API returned an invalid response") from exc
         if not isinstance(content, str) or not content.strip():
-            self._last_metadata = {
-                "backend": self.backend,
-                "model": self.model,
-                "thinking_mode": self.thinking_mode,
-                "latency_sec": latency,
-                "status": "empty_response",
-            }
             raise DialogueError("DeepSeek API returned empty robot text")
-
-        robot_text = content.strip()
-        self._history.append((clean_user_text, robot_text))
-        if len(self._history) > self.history_turns:
-            del self._history[: len(self._history) - self.history_turns]
 
         metadata: dict[str, Any] = {
             "backend": self.backend,
@@ -240,4 +200,4 @@ class DeepSeekDialogue:
         if usage:
             metadata["usage"] = usage
         self._last_metadata = metadata
-        return robot_text
+        return content.strip()

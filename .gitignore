@@ -66,3 +66,4 @@ compile_commands.json
 # Other generated artifacts
 **/artifacts/
 artifacts/
+wandb/

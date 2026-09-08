@@ -1,293 +1,234 @@
-"""Algorithm Runtime V1 orchestration with explicit coarse-grained state."""
+"""Stage 3 single-session voice Runtime orchestration."""
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
 from enum import Enum
-from pathlib import Path
+from typing import Awaitable, Callable, Protocol
+import uuid
 
-from .asr import WhisperASR
-from .dialogue import DialogueError, DialoguePolicy, FixedDialogue
-from .experiment_logger import ExperimentLogger
-from .motion import MotionTurn, SpeakerMotionPipeline
-from .neck_client import NeckClient
-from .tts import EdgeTTS, TTSResult
+from .contracts import (
+    DialogueRequest,
+    MotionRequest,
+    RobotSpeech,
+    RobotState,
+    SessionContext,
+    TurnContext,
+    TurnSummary,
+    UserAudio,
+)
+from .dialogue import DialogueError
+
+RobotAudioSender = Callable[[RobotSpeech], Awaitable[None]]
+
+
+class VAD(Protocol):
+    in_speech: bool
+
+    def push(self, pcm_frame: bytes) -> UserAudio | None: ...
+    def end_stream(self) -> UserAudio | None: ...
+    def reset(self) -> None: ...
 
 
 class RuntimeState(str, Enum):
-    IDLE = "IDLE"
-    RECEIVING_USER = "RECEIVING_USER"
-    TRANSCRIBING = "TRANSCRIBING"
-    THINKING = "THINKING"
-    SYNTHESIZING = "SYNTHESIZING"
-    SPEAKING = "SPEAKING"
-    ERROR = "ERROR"
+    LISTENING = "LISTENING"
+    PROCESSING = "PROCESSING"
+    OUTPUTTING = "OUTPUTTING"
+    COOLDOWN = "COOLDOWN"
 
 
-@dataclass(frozen=True)
-class TurnResult:
-    turn_number: int
-    experiment_turn_id: str | None
-    user_text: str
-    user_words: list[dict]
-    robot_text: str
-    robot_audio: TTSResult
-    motion: MotionTurn
-
-
-class AlgorithmRuntime:
-    """One process-wide runtime owning resident ASR and motion models."""
+class Runtime:
+    """Own one Audio session and run at most one voice Turn at a time."""
 
     def __init__(
         self,
-        baseline_checkpoint: str | Path,
-        whisper_model: str | Path,
-        dialogue: DialoguePolicy | None = None,
-        tts_voice: str = "en-US-GuyNeural",
-        asr_device: str = "cpu",
-        motion_device: str = "auto",
-        asr_language: str | None = "en",
-        neck_socket: str = "/tmp/neck_model.sock",
-        neck_measurement_socket: str = "/tmp/neck_measurement.sock",
-        mock_neck: bool = False,
-        experiment_logger: ExperimentLogger | None = None,
-    ):
-        self.state = RuntimeState.IDLE
-        self.turn_count = 0
-        self._turn_lock = asyncio.Lock()
-        self.experiment_logger = experiment_logger
-        self._active_experiment_turn_id: str | None = None
-        self.asr = WhisperASR(str(whisper_model), device=asr_device, language=asr_language)
-        self.dialogue = dialogue or FixedDialogue()
-        self.tts = EdgeTTS(tts_voice)
-        self.motion = SpeakerMotionPipeline(
-            baseline_checkpoint, device=motion_device
+        vad: VAD,
+        asr,
+        dialogue,
+        tts,
+        dialogue_fallback_text: str,
+        cooldown_ms: int = 200,
+        robot_state: RobotState | None = None,
+    ) -> None:
+        if cooldown_ms < 0:
+            raise ValueError("cooldown_ms must be non-negative")
+        if not dialogue_fallback_text.strip():
+            raise ValueError("dialogue_fallback_text must not be empty")
+        self.vad = vad
+        self.asr = asr
+        self.dialogue = dialogue
+        self.tts = tts
+        self.dialogue_fallback_text = dialogue_fallback_text.strip()
+        self.cooldown_sec = cooldown_ms / 1000.0
+        self.robot_state = robot_state or RobotState()
+
+        self.state = RuntimeState.LISTENING
+        self.session: SessionContext | None = None
+        self.active_turn: TurnContext | None = None
+        self.last_error: Exception | None = None
+        self._send_robot_audio: RobotAudioSender | None = None
+        self._turn_task: asyncio.Task[None] | None = None
+
+    def start_session(self, session_id: str | None = None) -> SessionContext:
+        if self.session is not None:
+            raise RuntimeError("a Runtime session is already active")
+        identifier = session_id or f"session_{uuid.uuid4().hex}"
+        if not identifier:
+            raise ValueError("session_id must not be empty")
+        self.session = SessionContext(session_id=identifier)
+        return self.session
+
+    def end_session(self) -> SessionContext:
+        if self.session is None:
+            raise RuntimeError("no Runtime session is active")
+        if self.active_turn is not None:
+            raise RuntimeError("cannot end a Runtime session with an active turn")
+        completed = self.session
+        self.session = None
+        return completed
+
+    def start_turn(self, turn_id: str | None = None) -> TurnContext:
+        if self.session is None:
+            raise RuntimeError("cannot start a turn without an active session")
+        if self.active_turn is not None:
+            raise RuntimeError("a Runtime turn is already active")
+        identifier = turn_id or f"turn_{uuid.uuid4().hex}"
+        if not identifier:
+            raise ValueError("turn_id must not be empty")
+        self.active_turn = TurnContext(turn_id=identifier, status="listening")
+        return self.active_turn
+
+    def complete_turn(self, status: str = "complete") -> TurnSummary:
+        if self.session is None or self.active_turn is None:
+            raise RuntimeError("no Runtime turn is active")
+        if not status:
+            raise ValueError("turn status must not be empty")
+
+        turn = self.active_turn
+        turn.status = status
+        user_text = turn.user_speech.text if turn.user_speech is not None else ""
+        robot_text = turn.robot_text or (
+            turn.robot_speech.text if turn.robot_speech is not None else ""
         )
-        self.neck = NeckClient(
-            neck_socket,
-            mock=mock_neck,
-            measurement_socket_path=neck_measurement_socket,
-        )
-        print(f"[runtime] ready; state={self.state.value}")
+        summary = TurnSummary(turn.turn_id, user_text, robot_text, status)
+        self.session.add_turn(summary)
+        self.active_turn = None
+        return summary
 
-    def _set_state(self, state: RuntimeState) -> None:
-        previous = self.state
-        self.state = state
-        print(f"[runtime][state] {previous.value} -> {state.value}")
+    def create_motion_request(self) -> MotionRequest:
+        """Keep the Stage 1 snapshot helper; Motion is not invoked in Stage 3."""
+        if self.session is None or self.active_turn is None:
+            raise RuntimeError("motion inference requires an active session and turn")
+        return MotionRequest.snapshot(self.active_turn, self.session, self.robot_state)
 
-    def begin_user_stream(self) -> None:
-        if self.state != RuntimeState.IDLE:
-            raise RuntimeError(f"runtime is busy: {self.state.value}")
-        self._set_state(RuntimeState.RECEIVING_USER)
+    def connection_opened(
+        self,
+        send_robot_audio: RobotAudioSender,
+        session_id: str | None = None,
+    ) -> SessionContext:
+        session = self.start_session(session_id)
+        self._send_robot_audio = send_robot_audio
+        self.vad.reset()
+        self.state = RuntimeState.LISTENING
+        self.last_error = None
+        return session
 
-    def fail(self, error: Exception) -> None:
-        self.abort_active_turn(error)
-        self._set_state(RuntimeState.ERROR)
-        print(f"[runtime][error] {type(error).__name__}: {error}")
+    async def connection_closed(self) -> None:
+        task = self._turn_task
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        self._turn_task = None
+        if self.active_turn is not None and self.session is not None:
+            self.complete_turn("disconnected")
+        if self.session is not None:
+            self.end_session()
+        self._send_robot_audio = None
+        self.vad.reset()
+        self.state = RuntimeState.LISTENING
 
-    def recover(self) -> None:
-        if self.state == RuntimeState.ERROR:
-            self._set_state(RuntimeState.IDLE)
+    def audio_stream_started(self) -> None:
+        if self.state == RuntimeState.LISTENING:
+            self.vad.reset()
 
-    def finish_speaking(self, turn_id: str | None = None) -> None:
-        completed_turn = turn_id or self._active_experiment_turn_id
-        if self.experiment_logger is not None and completed_turn is not None:
-            self.experiment_logger.end_turn(completed_turn)
-        if completed_turn == self._active_experiment_turn_id:
-            self._active_experiment_turn_id = None
-        if self.state == RuntimeState.SPEAKING:
-            self._set_state(RuntimeState.IDLE)
-
-    def abort_active_turn(self, error: Exception) -> None:
-        if self.experiment_logger is not None and self._active_experiment_turn_id is not None:
-            self.experiment_logger.end_turn(
-                self._active_experiment_turn_id,
-                status="error",
-                error=f"{type(error).__name__}: {error}",
-            )
-        self._active_experiment_turn_id = None
-
-    def record_robot_audio_start(self, turn_id: str | None, stream_id: str) -> None:
-        if self.experiment_logger is None or turn_id is None:
+    def audio_stream_ended(self) -> None:
+        if self.state != RuntimeState.LISTENING:
             return
-        self.experiment_logger.record_dialogue(turn_id, robot_stream_id=stream_id)
-        self.experiment_logger.record_event(turn_id, "robot_audio_start", stream_id=stream_id)
+        segment = self.vad.end_stream()
+        if segment is not None:
+            self._accept_segment(segment)
 
-    def record_robot_audio_end(self, turn_id: str | None, stream_id: str) -> None:
-        if self.experiment_logger is not None and turn_id is not None:
-            self.experiment_logger.record_event(turn_id, "robot_audio_end", stream_id=stream_id)
+    def push_audio_frame(self, pcm_frame: bytes) -> None:
+        if self.state != RuntimeState.LISTENING:
+            return
 
-    async def process_user_stream(
-        self, pcm_s16le: bytes, user_stream_id: str | None = None
-    ) -> TurnResult:
-        if self.state != RuntimeState.RECEIVING_USER:
-            raise RuntimeError(f"unexpected stream_end in state {self.state.value}")
-        if not pcm_s16le:
-            raise ValueError("empty user PCM stream")
+        was_in_speech = self.vad.in_speech
+        segment = self.vad.push(pcm_frame)
+        if not was_in_speech and self.vad.in_speech and self.active_turn is None:
+            self.start_turn()
+        if segment is not None:
+            self._accept_segment(segment)
 
-        async with self._turn_lock:
-            self.turn_count += 1
-            turn_number = self.turn_count
-            turn_id = None
-            if self.experiment_logger is not None:
-                turn_id = self.experiment_logger.start_turn(turn_number, user_stream_id)
-                self._active_experiment_turn_id = turn_id
-                self.experiment_logger.record_event(
-                    turn_id,
-                    "user_audio_end",
-                    stream_id=user_stream_id,
-                    pcm_bytes=len(pcm_s16le),
-                )
+    def _accept_segment(self, user_audio: UserAudio) -> None:
+        if self.active_turn is None:
+            # Real Silero starts the Turn when speech is confirmed. This fallback
+            # keeps an equivalent minimal VAD implementation usable.
+            self.start_turn()
+        assert self.active_turn is not None
+        self.active_turn.user_audio = user_audio
+        self.active_turn.status = "processing"
+        self.state = RuntimeState.PROCESSING
+        self._turn_task = asyncio.create_task(self._process_active_turn())
 
+    async def _process_active_turn(self) -> None:
+        turn = self.active_turn
+        session = self.session
+        sender = self._send_robot_audio
+        if turn is None or turn.user_audio is None or session is None or sender is None:
+            return
+
+        try:
+            user_speech = await asyncio.to_thread(self.asr.transcribe, turn.user_audio)
+            turn.user_speech = user_speech
+            if not user_speech.text.strip():
+                await self._finish_turn("empty_speech")
+                return
+
+            request = DialogueRequest.from_session(user_speech.text, session)
+            used_fallback = False
             try:
-                self._set_state(RuntimeState.TRANSCRIBING)
-                transcription = await asyncio.to_thread(self.asr.transcribe_pcm, pcm_s16le)
-                user_words = [word.as_dict() for word in transcription.words]
-                user_text = transcription.text.strip()
-                if self.experiment_logger is not None and turn_id is not None:
-                    self.experiment_logger.record_event(
-                        turn_id, "asr_complete", word_count=len(user_words)
-                    )
-                if not user_text:
-                    raise DialogueError("ASR returned empty user text")
+                robot_text = await asyncio.to_thread(self.dialogue.reply, request)
+            except DialogueError as exc:
+                self.last_error = exc
+                robot_text = self.dialogue_fallback_text
+                used_fallback = True
+            turn.robot_text = robot_text
 
-                self._set_state(RuntimeState.THINKING)
-                dialogue_backend = getattr(
-                    self.dialogue, "backend", type(self.dialogue).__name__
-                )
-                dialogue_model = getattr(self.dialogue, "model", None)
-                if self.experiment_logger is not None and turn_id is not None:
-                    self.experiment_logger.record_event(turn_id, "thinking_start")
-                    self.experiment_logger.record_event(
-                        turn_id,
-                        "dialogue_start",
-                        backend=dialogue_backend,
-                        model=dialogue_model,
-                    )
-                try:
-                    robot_text = await asyncio.to_thread(self.dialogue.reply, user_text)
-                except Exception:
-                    metadata = getattr(self.dialogue, "metadata", {})
-                    if self.experiment_logger is not None and turn_id is not None:
-                        self.experiment_logger.record_event(
-                            turn_id,
-                            "dialogue_failed",
-                            backend=metadata.get("backend", dialogue_backend),
-                            model=metadata.get("model", dialogue_model),
-                            latency_sec=metadata.get("latency_sec"),
-                        )
-                    raise
-                if not isinstance(robot_text, str) or not robot_text.strip():
-                    raise DialogueError("dialogue backend returned empty robot text")
-                robot_text = robot_text.strip()
-                metadata = getattr(self.dialogue, "metadata", {})
-                print(f"[runtime][dialogue] user={user_text!r} -> robot={robot_text!r}")
-                if self.experiment_logger is not None and turn_id is not None:
-                    self.experiment_logger.record_event(
-                        turn_id,
-                        "dialogue_complete",
-                        backend=metadata.get("backend", dialogue_backend),
-                        model=metadata.get("model", dialogue_model),
-                        latency_sec=metadata.get("latency_sec"),
-                    )
-                    self.experiment_logger.record_dialogue(
-                        turn_id,
-                        user_text=user_text,
-                        robot_text=robot_text,
-                        user_words=user_words,
-                        user_stream_id=user_stream_id,
-                        dialogue_backend=metadata.get("backend", dialogue_backend),
-                        dialogue_model=metadata.get("model", dialogue_model),
-                        dialogue_latency_sec=metadata.get("latency_sec"),
-                        dialogue_usage=metadata.get("usage"),
-                    )
+            robot_speech = await self.tts.synthesize(robot_text)
+            if not isinstance(robot_speech, RobotSpeech):
+                raise TypeError("TTS must return RobotSpeech")
+            turn.robot_speech = robot_speech
+            turn.status = "outputting"
+            self.state = RuntimeState.OUTPUTTING
+            await sender(robot_speech)
+            await self._finish_turn("complete_fallback" if used_fallback else "complete")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.last_error = exc
+            if self.active_turn is turn:
+                await self._finish_turn("failed")
 
-                self._set_state(RuntimeState.SYNTHESIZING)
-                robot_audio = await self.tts.synthesize(robot_text)
-                if self.experiment_logger is not None and turn_id is not None:
-                    self.experiment_logger.record_event(
-                        turn_id,
-                        "tts_complete",
-                        duration_sec=robot_audio.duration_sec,
-                    )
-                # Edge normally supplies WordBoundary metadata. Keep one resident ASR
-                # fallback for voices/services that don't return it.
-                if robot_audio.words:
-                    robot_words = [word.as_dict() for word in robot_audio.words]
-                else:
-                    robot_transcription = await asyncio.to_thread(
-                        self.asr.transcribe_waveform, robot_audio.waveform
-                    )
-                    robot_words = [word.as_dict() for word in robot_transcription.words]
+    async def _finish_turn(self, status: str) -> None:
+        if self.active_turn is not None:
+            self.complete_turn(status)
+        self.vad.reset()
+        self.state = RuntimeState.COOLDOWN
+        await asyncio.sleep(self.cooldown_sec)
+        if self.session is not None:
+            self.state = RuntimeState.LISTENING
 
-                if self.experiment_logger is not None and turn_id is not None:
-                    await asyncio.to_thread(
-                        self.experiment_logger.record_robot_motion_inputs,
-                        turn_id,
-                        robot_audio.pcm_s16le,
-                        robot_words,
-                        robot_audio.duration_sec,
-                    )
-
-                def record_generation(role, trajectory, metadata) -> None:
-                    if self.experiment_logger is not None and turn_id is not None:
-                        self.experiment_logger.record_generation(
-                            turn_id,
-                            role,
-                            trajectory,
-                            fps=metadata["fps"],
-                            model=metadata.get("model"),
-                            checkpoint=metadata.get("checkpoint"),
-                            query_timestamps_sec=metadata.get("query_timestamps_sec"),
-                            representation=metadata.get("representation"),
-                        )
-
-                motion = await asyncio.to_thread(
-                    self.motion.generate_turn,
-                    robot_audio.pcm_s16le,
-                    robot_words,
-                    robot_audio.duration_sec,
-                    turn_number,
-                    record_generation,
-                )
-                if self.experiment_logger is not None and turn_id is not None:
-                    self.experiment_logger.record_event(
-                        turn_id,
-                        "neck_trajectory_ready",
-                        num_frames=len(motion.document["trajectory"]),
-                    )
-                    await asyncio.to_thread(
-                        self.experiment_logger.record_final_neck_trajectory,
-                        turn_id,
-                        motion.document,
-                    )
-
-                measured_output_path = None
-                turn_origin_unix_sec = None
-                if self.experiment_logger is not None and turn_id is not None:
-                    measured_output_path, turn_origin_unix_sec = (
-                        self.experiment_logger.measured_rpy_target(turn_id)
-                    )
-                await asyncio.to_thread(
-                    self.neck.send,
-                    motion.document,
-                    measured_output_path,
-                    turn_origin_unix_sec,
-                )
-                if self.experiment_logger is not None and turn_id is not None:
-                    self.experiment_logger.record_event(
-                        turn_id, "neck_trajectory_sent", mock=self.neck.mock
-                    )
-                self._set_state(RuntimeState.SPEAKING)
-                return TurnResult(
-                    turn_number=turn_number,
-                    experiment_turn_id=turn_id,
-                    user_text=user_text,
-                    user_words=user_words,
-                    robot_text=robot_text,
-                    robot_audio=robot_audio,
-                    motion=motion,
-                )
-            except Exception as exc:
-                self.abort_active_turn(exc)
-                raise
+    async def wait_for_current_turn(self) -> None:
+        """Wait for the current pure-software processing/output task in tests."""
+        task = self._turn_task
+        if task is not None:
+            await asyncio.shield(task)

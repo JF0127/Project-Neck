@@ -1,0 +1,29 @@
+audio:
+  host: 0.0.0.0
+  port: 8765
+vad:
+  backend: silero
+  model_path: models/silero_vad/silero_vad.jit
+  threshold: 0.5
+  min_speech_ms: 250
+  min_silence_ms: 500
+asr:
+  backend: whisper
+  model_path: models/whisper-base-ct2
+  device: cpu
+  language: en
+dialogue:
+  backend: deepseek
+  model: deepseek-v4-flash
+  base_url: https://api.deepseek.com
+  timeout_sec: 30.0
+  temperature: 0.7
+tts:
+  backend: edge
+  voice: en-US-GuyNeural
+runtime:
+  dialogue_fallback_text: "抱歉，我刚才没有处理好，请再说一次。"
+  cooldown_ms: 200
+motion: {}
+motor: {}
+recorder: {}

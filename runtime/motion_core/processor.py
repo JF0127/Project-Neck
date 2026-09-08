@@ -1,0 +1,118 @@
+"""Common pure-software processing for all Motion backend outputs."""
+from __future__ import annotations
+
+import math
+from typing import Sequence
+
+from ..contracts import FinalTrajectory, MotionOutput
+from .base import MOTION_FPS, validate_motion_output
+
+NEUTRAL_RPY = (0.0, 0.0, 0.0)
+_VALID_STATES = {"speaking", "listening", "silent"}
+
+
+def _rpy(value: Sequence[float], name: str) -> tuple[float, float, float]:
+    try:
+        if len(value) != 3:
+            raise ValueError
+        converted = tuple(float(component) for component in value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must contain exactly three numbers") from exc
+    if not all(math.isfinite(component) for component in converted):
+        raise ValueError(f"{name} contains NaN or Inf")
+    return converted  # type: ignore[return-value]
+
+
+def _interpolate(
+    start: tuple[float, float, float],
+    end: tuple[float, float, float],
+    weight: float,
+) -> tuple[float, float, float]:
+    return tuple(
+        before + (after - before) * weight
+        for before, after in zip(start, end)
+    )  # type: ignore[return-value]
+
+
+class MotionProcessor:
+    """Convert offsets to absolute RPY and add simple endpoint transitions.
+
+    This first version deliberately does not smooth or apply hardware limits.
+    It starts at the supplied measured pose, linearly reaches the backend's
+    first absolute target, preserves all later model frames, and linearly
+    returns to the kinematic neutral pose ``[0, 0, 0]``.
+    """
+
+    def __init__(
+        self,
+        start_transition_frames: int = 3,
+        neutral_return_frames: int = 24,
+    ) -> None:
+        if start_transition_frames < 1:
+            raise ValueError("start_transition_frames must be at least 1")
+        if neutral_return_frames < 1:
+            raise ValueError("neutral_return_frames must be at least 1")
+        self.start_transition_frames = start_transition_frames
+        self.neutral_return_frames = neutral_return_frames
+
+    @staticmethod
+    def offset_to_absolute(
+        output: MotionOutput,
+        start_rpy: Sequence[float],
+    ) -> tuple[tuple[float, float, float], ...]:
+        validated = validate_motion_output(output)
+        start = _rpy(start_rpy, "start_rpy")
+        return tuple(
+            tuple(start[axis] + frame[axis] for axis in range(3))
+            for frame in validated.rpy_offset
+        )  # type: ignore[return-value]
+
+    def process(
+        self,
+        output: MotionOutput,
+        start_rpy: Sequence[float],
+    ) -> FinalTrajectory:
+        start = _rpy(start_rpy, "start_rpy")
+        absolute = self.offset_to_absolute(output, start)
+
+        first_target = absolute[0]
+        trajectory: list[tuple[float, float, float]] = [start]
+        if first_target != start:
+            for step in range(1, self.start_transition_frames + 1):
+                trajectory.append(
+                    _interpolate(start, first_target, step / self.start_transition_frames)
+                )
+        trajectory.extend(absolute[1:])
+        states = ["speaking"] * len(trajectory)
+
+        last = trajectory[-1]
+        if last != NEUTRAL_RPY:
+            for step in range(1, self.neutral_return_frames + 1):
+                trajectory.append(
+                    _interpolate(last, NEUTRAL_RPY, step / self.neutral_return_frames)
+                )
+                states.append("silent")
+
+        result = FinalTrajectory(
+            rpy=tuple(trajectory),
+            fps=MOTION_FPS,
+            states=tuple(states),
+            duration_sec=len(trajectory) / MOTION_FPS,
+        )
+        self.validate_final(result)
+        return result
+
+    @staticmethod
+    def validate_final(trajectory: FinalTrajectory) -> None:
+        if float(trajectory.fps) != MOTION_FPS:
+            raise ValueError("final trajectory fps must be exactly 30")
+        frames = tuple(_rpy(frame, "final trajectory frame") for frame in trajectory.rpy)
+        if not frames or len(frames) != len(trajectory.states):
+            raise ValueError("final trajectory frames/states must be non-empty and equal length")
+        if any(state not in _VALID_STATES for state in trajectory.states):
+            raise ValueError("final trajectory contains an invalid state")
+        expected_duration = len(frames) / MOTION_FPS
+        if not math.isfinite(trajectory.duration_sec) or not math.isclose(
+            trajectory.duration_sec, expected_duration, rel_tol=0.0, abs_tol=1e-12
+        ):
+            raise ValueError("final trajectory duration does not match its frame count")
