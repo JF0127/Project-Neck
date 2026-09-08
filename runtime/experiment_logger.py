@@ -11,6 +11,7 @@ import re
 import threading
 import time
 from typing import Any, Sequence
+import wave
 
 DEFAULT_ROOT = Path(__file__).resolve().parent / "experiments/v0_trajectory"
 _SAFE_NAME = re.compile(r"[^A-Za-z0-9_-]+")
@@ -136,6 +137,10 @@ class ExperimentLogger:
         user_words: list[dict] | None = None,
         user_stream_id: str | None = None,
         robot_stream_id: str | None = None,
+        dialogue_backend: str | None = None,
+        dialogue_model: str | None = None,
+        dialogue_latency_sec: float | None = None,
+        dialogue_usage: dict[str, int] | None = None,
     ) -> None:
         try:
             with self._lock:
@@ -146,8 +151,20 @@ class ExperimentLogger:
                     "user_words": user_words,
                     "user_stream_id": user_stream_id,
                     "robot_stream_id": robot_stream_id,
+                    "dialogue_backend": dialogue_backend,
+                    "dialogue_model": dialogue_model,
+                    "dialogue_latency_sec": dialogue_latency_sec,
                 }
                 dialogue.update({key: value for key, value in values.items() if value is not None})
+                if dialogue_usage is not None:
+                    usage = {
+                        key: int(dialogue_usage[key])
+                        for key in ("prompt_tokens", "completion_tokens", "total_tokens")
+                        if isinstance(dialogue_usage.get(key), int)
+                        and dialogue_usage[key] >= 0
+                    }
+                    if usage:
+                        dialogue["dialogue_usage"] = usage
                 self._write_json(self._turns[turn_id]["dir"] / "dialogue.json", dialogue)
         except Exception as exc:
             self._warning(f"record dialogue for {turn_id}", exc)
@@ -167,14 +184,64 @@ class ExperimentLogger:
             result.append(converted)
         return result
 
+    def record_robot_motion_inputs(
+        self,
+        turn_id: str,
+        pcm_s16le: bytes,
+        words: list[dict],
+        duration_sec: float,
+    ) -> None:
+        """Save the exact TTS inputs supplied to Baseline V1."""
+        try:
+            if not pcm_s16le or len(pcm_s16le) % 2:
+                raise ValueError("robot PCM must contain complete int16 samples")
+            duration = float(duration_sec)
+            if not math.isfinite(duration) or duration <= 0.0:
+                raise ValueError("robot duration_sec must be finite and positive")
+            with self._lock:
+                turn_dir = self._turns[turn_id]["dir"]
+                path = turn_dir / "robot_audio.wav"
+                temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+                with wave.open(str(temporary), "wb") as output:
+                    output.setnchannels(1)
+                    output.setsampwidth(2)
+                    output.setframerate(16_000)
+                    output.writeframes(pcm_s16le)
+                temporary.replace(path)
+                self._write_json(turn_dir / "robot_words.json", list(words))
+                self._write_json(
+                    turn_dir / "robot_motion_input.json",
+                    {
+                        "audio_file": "robot_audio.wav",
+                        "words_file": "robot_words.json",
+                        "sample_rate": 16_000,
+                        "channels": 1,
+                        "format": "pcm_s16le",
+                        "pcm_bytes": len(pcm_s16le),
+                        "num_samples": len(pcm_s16le) // 2,
+                        "duration_sec": duration,
+                    },
+                )
+                self.record_event(
+                    turn_id,
+                    "robot_motion_inputs_recorded",
+                    pcm_bytes=len(pcm_s16le),
+                    word_count=len(words),
+                    duration_sec=duration,
+                )
+        except Exception as exc:
+            self._warning(f"record robot motion inputs for {turn_id}", exc)
+
     def record_generation(
         self,
         turn_id: str,
         role: str,
         trajectory: Any,
         fps: float,
-        candidate_index: int | None = None,
-        energy_deg_per_s: float | None = None,
+        model: str | None = None,
+        checkpoint: str | None = None,
+        query_timestamps_sec: list[float] | None = None,
+        representation: str | None = None,
     ) -> str | None:
         try:
             frames = self._trajectory_list(trajectory)
@@ -192,10 +259,21 @@ class ExperimentLogger:
                     "num_frames": len(frames),
                     "trajectory": frames,
                 }
-                if candidate_index is not None:
-                    document["candidate_index"] = candidate_index
-                if energy_deg_per_s is not None:
-                    document["energy_deg_per_s"] = energy_deg_per_s
+                if model is not None:
+                    document["model"] = model
+                if checkpoint is not None:
+                    document["checkpoint"] = checkpoint
+                if representation is not None:
+                    document["representation"] = representation
+                if query_timestamps_sec is not None:
+                    timestamps = [float(value) for value in query_timestamps_sec]
+                    if len(timestamps) != len(frames) or not all(
+                        math.isfinite(value) for value in timestamps
+                    ):
+                        raise ValueError(
+                            "query_timestamps_sec must be finite and match trajectory length"
+                        )
+                    document["query_timestamps_sec"] = timestamps
                 path = turn["generations_dir"] / f"{generation_id}_{safe_role}.json"
                 self._write_json(path, document)
                 self.record_event(

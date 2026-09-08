@@ -1,0 +1,60 @@
+data:
+  dataset_root: dataset/datasets/zhubo_shuo_lianbo
+  split_version: split_v1
+  num_workers: 0
+
+target:
+  representation: rpy_offset
+  order: [roll, pitch, yaw]
+  unit: rad
+  reference: first_neck_sample
+  skip_invalid_reference: true
+
+features:
+  audio_dim: 64
+  text_dim: 64
+  audio_frontend:
+    sample_rate: 16000
+    n_fft: 400
+    win_length: 400
+    hop_length: 160
+    n_mels: 80
+    center: false
+    boundary: edge_hold
+  text_frontend:
+    tokenizer: unicode_character
+    word_pooling: mean
+    interval: "[start,end)"
+    no_word: learned_embedding
+
+model:
+  hidden_dim: 128
+  layers: 2
+  heads: 4
+  ffn_dim: 256
+  dropout: 0.1
+
+loss:
+  position_weight: 1.0
+  velocity_weight: 0.1
+  position_beta: 0.05
+
+training:
+  seed: 42
+  device: auto
+  batch_size: 8
+  epochs: 50
+  learning_rate: 0.0001
+  weight_decay: 0.0001
+  grad_clip: 1.0
+  log_every: 10
+
+wandb:
+  enabled: true
+  project: project-neck
+  name: baseline-audio-text
+  tags: [baseline, audio-text, rpy-offset]
+
+output:
+  root: algorithm/outputs
+  experiment: baseline_audio_text

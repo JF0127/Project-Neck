@@ -1,12 +1,16 @@
 # Runtime 开发与硬件安全规则
 
 `runtime/` 负责所有真实机器人在线能力：Audio、ASR、Dialogue、TTS、motion inference、
-trajectory、Motor、反馈和真机实验。它不负责训练，也不得 import `algorithm/` 训练源码。
+trajectory、Motor、反馈和真机实验。它不负责训练。Baseline V1 第一版部署允许直接复用
+`algorithm.features` 与 `algorithm.models.baseline`；不得 import Dataset loader、loss 或训练入口。
 
 ## 边界
 
-- `motion_model/` 是当前 V3 deployment checkpoint 的最小冻结推理实现；只为保持现有 Runtime。
-- `models/` 保存本地部署资产；未来新 Algorithm 应交付独立 model package 后由 adapter 加载。
+- Whisper 只负责 user audio → user text；DeepSeek 只负责 user text → robot text；Edge TTS
+  只负责 robot text → robot audio；Baseline V1 只负责 robot audio/word timestamps → speaker RPY。
+- DeepSeek 不接收动作输入，不生成动作指令，也不参与 Motion、RPY 或 Motor 控制。
+- 当前 `baseline_motion.py` 恢复 Algorithm Baseline V1，仅生成 robot TTS 对应的 speaker motion。
+- `models/` 保存本地部署资产；旧 `models/neck_motion_v3/` 若仍存在仅是 historical asset，当前 Runtime 不得加载。
 - `experiments/` 只能旁路记录，不得作为 Audio、motion 或 Motor 的运行时数据总线。
 - `audio/` 和 `motor/` 保持自身现有结构与协议；目录移动不是修改业务行为的许可。
 

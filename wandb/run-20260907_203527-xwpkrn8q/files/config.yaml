@@ -1,0 +1,133 @@
+_wandb:
+    value:
+        cli_version: 0.29.0
+        e:
+            in9d5fp6qqieuilczd5vnzcrg3rssly4:
+                args:
+                    - --config
+                    - algorithm/configs/baseline.yaml
+                cpu_count: 12
+                cpu_count_logical: 20
+                cudaVersion: "13.2"
+                disk:
+                    /:
+                        total: "502418825216"
+                        used: "381866745856"
+                email: 2022302111388@whu.edu.cn
+                executable: /home/jhl/projects/Project-Neck/algorithm/.venv/bin/python
+                git:
+                    commit: 4e5f728464bb851a0310c4b3f48382d39b53b312
+                    remote: git@github.com:JF0127/Project-Neck.git
+                gpu: NVIDIA GeForce RTX 3090
+                gpu_count: 1
+                gpu_nvidia:
+                    - architecture: Ampere
+                      cudaCores: 10496
+                      memoryTotal: "25769803776"
+                      name: NVIDIA GeForce RTX 3090
+                      uuid: GPU-0d1bd3a6-aae7-285c-4362-d4d78efd9e5f
+                host: jhl-lab
+                memory:
+                    total: "33412341760"
+                os: Linux-6.8.0-136-generic-x86_64-with-glibc2.35
+                program: -m algorithm.train
+                python: CPython 3.11.15
+                root: /home/jhl/projects/Project-Neck
+                startedAt: "2026-09-07T12:35:27.237491Z"
+                writerId: in9d5fp6qqieuilczd5vnzcrg3rssly4
+        m: []
+        python_version: 3.11.15
+        t:
+            "1":
+                - 1
+            "2":
+                - 1
+            "3":
+                - 2
+                - 13
+                - 15
+                - 16
+                - 61
+            "4": 3.11.15
+            "5": 0.29.0
+            "12": 0.29.0
+            "13": linux-x86_64
+data:
+    value:
+        dataset_root: dataset/datasets/zhubo_shuo_lianbo
+        num_workers: 0
+        original_counts:
+            train: 314
+            val: 42
+        reference_valid_counts:
+            train: 309
+            val: 39
+        split_version: split_v1
+features:
+    value:
+        audio_dim: 64
+        audio_frontend:
+            boundary: edge_hold
+            center: false
+            hop_length: 160
+            n_fft: 400
+            n_mels: 80
+            sample_rate: 16000
+            win_length: 400
+        text_dim: 64
+        text_frontend:
+            interval: '[start,end)'
+            no_word: learned_embedding
+            tokenizer: unicode_character
+            word_pooling: mean
+loss:
+    value:
+        position_beta: 0.05
+        position_weight: 1
+        velocity_weight: 0.1
+model:
+    value:
+        dropout: 0.1
+        ffn_dim: 256
+        heads: 4
+        hidden_dim: 128
+        layers: 2
+output:
+    value:
+        experiment: baseline_audio_text
+        root: algorithm/outputs
+parameters:
+    value:
+        baseline_model_trainable: 290176
+        feature_encoder_trainable: 121664
+        optimizer: 411840
+        total_trainable: 411840
+target:
+    value:
+        order:
+            - roll
+            - pitch
+            - yaw
+        reference: first_neck_sample
+        representation: rpy_offset
+        skip_invalid_reference: true
+        unit: rad
+training:
+    value:
+        batch_size: 8
+        device: auto
+        epochs: 50
+        grad_clip: 1
+        learning_rate: 0.0001
+        log_every: 10
+        seed: 42
+        weight_decay: 0.0001
+wandb:
+    value:
+        enabled: true
+        name: baseline-audio-text
+        project: project-neck
+        tags:
+            - baseline
+            - audio-text
+            - rpy-offset

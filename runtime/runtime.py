@@ -7,9 +7,9 @@ from enum import Enum
 from pathlib import Path
 
 from .asr import WhisperASR
-from .dialogue import DialoguePolicy, FixedDialogue
+from .dialogue import DialogueError, DialoguePolicy, FixedDialogue
 from .experiment_logger import ExperimentLogger
-from .motion import MotionTurn, ResidentMotionModel
+from .motion import MotionTurn, SpeakerMotionPipeline
 from .neck_client import NeckClient
 from .tts import EdgeTTS, TTSResult
 
@@ -40,17 +40,16 @@ class AlgorithmRuntime:
 
     def __init__(
         self,
-        checkpoint: str | Path,
+        baseline_checkpoint: str | Path,
         whisper_model: str | Path,
         dialogue: DialoguePolicy | None = None,
         tts_voice: str = "en-US-GuyNeural",
         asr_device: str = "cpu",
-        motion_device: str = "cpu",
+        motion_device: str = "auto",
         asr_language: str | None = "en",
         neck_socket: str = "/tmp/neck_model.sock",
         neck_measurement_socket: str = "/tmp/neck_measurement.sock",
         mock_neck: bool = False,
-        num_candidates: int = 8,
         experiment_logger: ExperimentLogger | None = None,
     ):
         self.state = RuntimeState.IDLE
@@ -61,8 +60,8 @@ class AlgorithmRuntime:
         self.asr = WhisperASR(str(whisper_model), device=asr_device, language=asr_language)
         self.dialogue = dialogue or FixedDialogue()
         self.tts = EdgeTTS(tts_voice)
-        self.motion = ResidentMotionModel(
-            checkpoint, device=motion_device, num_candidates=num_candidates
+        self.motion = SpeakerMotionPipeline(
+            baseline_checkpoint, device=motion_device
         )
         self.neck = NeckClient(
             neck_socket,
@@ -144,23 +143,63 @@ class AlgorithmRuntime:
                 self._set_state(RuntimeState.TRANSCRIBING)
                 transcription = await asyncio.to_thread(self.asr.transcribe_pcm, pcm_s16le)
                 user_words = [word.as_dict() for word in transcription.words]
+                user_text = transcription.text.strip()
                 if self.experiment_logger is not None and turn_id is not None:
                     self.experiment_logger.record_event(
                         turn_id, "asr_complete", word_count=len(user_words)
                     )
+                if not user_text:
+                    raise DialogueError("ASR returned empty user text")
 
                 self._set_state(RuntimeState.THINKING)
+                dialogue_backend = getattr(
+                    self.dialogue, "backend", type(self.dialogue).__name__
+                )
+                dialogue_model = getattr(self.dialogue, "model", None)
                 if self.experiment_logger is not None and turn_id is not None:
                     self.experiment_logger.record_event(turn_id, "thinking_start")
-                robot_text = self.dialogue.reply(transcription.text)
-                print(f"[runtime][dialogue] user={transcription.text!r} -> robot={robot_text!r}")
+                    self.experiment_logger.record_event(
+                        turn_id,
+                        "dialogue_start",
+                        backend=dialogue_backend,
+                        model=dialogue_model,
+                    )
+                try:
+                    robot_text = await asyncio.to_thread(self.dialogue.reply, user_text)
+                except Exception:
+                    metadata = getattr(self.dialogue, "metadata", {})
+                    if self.experiment_logger is not None and turn_id is not None:
+                        self.experiment_logger.record_event(
+                            turn_id,
+                            "dialogue_failed",
+                            backend=metadata.get("backend", dialogue_backend),
+                            model=metadata.get("model", dialogue_model),
+                            latency_sec=metadata.get("latency_sec"),
+                        )
+                    raise
+                if not isinstance(robot_text, str) or not robot_text.strip():
+                    raise DialogueError("dialogue backend returned empty robot text")
+                robot_text = robot_text.strip()
+                metadata = getattr(self.dialogue, "metadata", {})
+                print(f"[runtime][dialogue] user={user_text!r} -> robot={robot_text!r}")
                 if self.experiment_logger is not None and turn_id is not None:
+                    self.experiment_logger.record_event(
+                        turn_id,
+                        "dialogue_complete",
+                        backend=metadata.get("backend", dialogue_backend),
+                        model=metadata.get("model", dialogue_model),
+                        latency_sec=metadata.get("latency_sec"),
+                    )
                     self.experiment_logger.record_dialogue(
                         turn_id,
-                        user_text=transcription.text,
+                        user_text=user_text,
                         robot_text=robot_text,
                         user_words=user_words,
                         user_stream_id=user_stream_id,
+                        dialogue_backend=metadata.get("backend", dialogue_backend),
+                        dialogue_model=metadata.get("model", dialogue_model),
+                        dialogue_latency_sec=metadata.get("latency_sec"),
+                        dialogue_usage=metadata.get("usage"),
                     )
 
                 self._set_state(RuntimeState.SYNTHESIZING)
@@ -181,6 +220,15 @@ class AlgorithmRuntime:
                     )
                     robot_words = [word.as_dict() for word in robot_transcription.words]
 
+                if self.experiment_logger is not None and turn_id is not None:
+                    await asyncio.to_thread(
+                        self.experiment_logger.record_robot_motion_inputs,
+                        turn_id,
+                        robot_audio.pcm_s16le,
+                        robot_words,
+                        robot_audio.duration_sec,
+                    )
+
                 def record_generation(role, trajectory, metadata) -> None:
                     if self.experiment_logger is not None and turn_id is not None:
                         self.experiment_logger.record_generation(
@@ -188,18 +236,17 @@ class AlgorithmRuntime:
                             role,
                             trajectory,
                             fps=metadata["fps"],
-                            candidate_index=metadata.get("candidate_index"),
-                            energy_deg_per_s=metadata.get("energy_deg_per_s"),
+                            model=metadata.get("model"),
+                            checkpoint=metadata.get("checkpoint"),
+                            query_timestamps_sec=metadata.get("query_timestamps_sec"),
+                            representation=metadata.get("representation"),
                         )
 
                 motion = await asyncio.to_thread(
                     self.motion.generate_turn,
-                    pcm_s16le,
-                    user_words,
-                    transcription.text,
                     robot_audio.pcm_s16le,
                     robot_words,
-                    robot_text,
+                    robot_audio.duration_sec,
                     turn_number,
                     record_generation,
                 )
@@ -235,7 +282,7 @@ class AlgorithmRuntime:
                 return TurnResult(
                     turn_number=turn_number,
                     experiment_turn_id=turn_id,
-                    user_text=transcription.text,
+                    user_text=user_text,
                     user_words=user_words,
                     robot_text=robot_text,
                     robot_audio=robot_audio,

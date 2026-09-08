@@ -1,3 +1,8 @@
-# Runtime also requires torch, numpy, scipy, soundfile, faster-whisper and edge-tts;
-# this file currently records only the additional WebSocket dependency.
+torch
+numpy
+scipy
+soundfile
+faster-whisper
+edge-tts
 websockets>=12.0,<16.0
+openai>=1.0,<3.0
