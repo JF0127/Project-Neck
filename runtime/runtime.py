@@ -17,6 +17,8 @@ from .contracts import (
     UserAudio,
 )
 from .dialogue import DialogueError
+from .inference.default_motion import DEFAULT_GENERATION_FALLBACK_TEXT
+from .inference.generator import GeneratedTurn, PoseUnavailableError, TurnGenerator
 
 RobotAudioSender = Callable[[RobotSpeech], Awaitable[None]]
 
@@ -48,9 +50,14 @@ class Runtime:
         dialogue_fallback_text: str,
         cooldown_ms: int = 200,
         robot_state: RobotState | None = None,
+        turn_generator: TurnGenerator | None = None,
+        neck_sender=None,
+        motion_sync_offset_ms: int = 0,
     ) -> None:
         if cooldown_ms < 0:
             raise ValueError("cooldown_ms must be non-negative")
+        if motion_sync_offset_ms < 0:
+            raise ValueError("motion_sync_offset_ms must be non-negative")
         if not dialogue_fallback_text.strip():
             raise ValueError("dialogue_fallback_text must not be empty")
         self.vad = vad
@@ -60,6 +67,9 @@ class Runtime:
         self.dialogue_fallback_text = dialogue_fallback_text.strip()
         self.cooldown_sec = cooldown_ms / 1000.0
         self.robot_state = robot_state or RobotState()
+        self.turn_generator = turn_generator
+        self.neck_sender = neck_sender
+        self.motion_sync_offset_ms = int(motion_sync_offset_ms)
 
         self.state = RuntimeState.LISTENING
         self.session: SessionContext | None = None
@@ -115,7 +125,7 @@ class Runtime:
         return summary
 
     def create_motion_request(self) -> MotionRequest:
-        """Keep the Stage 1 snapshot helper; Motion is not invoked in Stage 3."""
+        """Snapshot the active turn for backend-specific inference."""
         if self.session is None or self.active_turn is None:
             raise RuntimeError("motion inference requires an active session and turn")
         return MotionRequest.snapshot(self.active_turn, self.session, self.robot_state)
@@ -209,14 +219,101 @@ class Runtime:
             turn.robot_speech = robot_speech
             turn.status = "outputting"
             self.state = RuntimeState.OUTPUTTING
-            await sender(robot_speech)
-            await self._finish_turn("complete_fallback" if used_fallback else "complete")
+
+            if self.turn_generator is None:
+                await sender(robot_speech)
+            else:
+                generated, used_fallback = await self._generate_turn(
+                    turn, used_fallback
+                )
+                turn.robot_speech = generated.speech
+                await self._play_turn(generated, sender)
+            await self._finish_turn(
+                "complete_fallback" if used_fallback else "complete"
+            )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             self.last_error = exc
             if self.active_turn is turn:
                 await self._finish_turn("failed")
+
+    async def _generate_turn(
+        self, turn: TurnContext, used_fallback: bool
+    ) -> tuple[GeneratedTurn, bool]:
+        """Generate files for this turn; fall back to the default reply+shake."""
+        assert self.turn_generator is not None
+        name = f"turn_{turn.turn_id}"
+        request = self.create_motion_request()
+        try:
+            generated = await asyncio.to_thread(
+                self.turn_generator.generate, request, name
+            )
+            return generated, used_fallback
+        except PoseUnavailableError as exc:
+            self.last_error = exc
+            print(f"[runtime][motion] audio only, pose unavailable: {exc}")
+            generated = await asyncio.to_thread(
+                self.turn_generator.generate_audio_only, request, name, str(exc)
+            )
+            return generated, used_fallback
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.last_error = exc
+            print(
+                "[runtime][motion] generation failed, default reply + shake: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            fallback_text = DEFAULT_GENERATION_FALLBACK_TEXT
+            fallback_speech = await self.tts.synthesize(fallback_text)
+            if not isinstance(fallback_speech, RobotSpeech):
+                raise TypeError("TTS must return RobotSpeech")
+            turn.robot_text = fallback_text
+            turn.robot_speech = fallback_speech
+            request = self.create_motion_request()
+            generated = await asyncio.to_thread(
+                self.turn_generator.generate_fallback,
+                request,
+                name,
+                f"{type(exc).__name__}: {exc}",
+            )
+            return generated, True
+
+    async def _play_turn(
+        self, generated: GeneratedTurn, sender: RobotAudioSender
+    ) -> None:
+        """Play generated audio while sending the trajectory to the motor."""
+        audio_task = asyncio.create_task(sender(generated.speech))
+        try:
+            if generated.document is not None and self.neck_sender is not None:
+                if self.robot_state.motion_executing:
+                    print(
+                        "[runtime][motion] skipped: a neck trajectory is "
+                        "already executing"
+                    )
+                else:
+                    if self.motion_sync_offset_ms > 0:
+                        await asyncio.sleep(self.motion_sync_offset_ms / 1000.0)
+                    try:
+                        await asyncio.to_thread(
+                            self.neck_sender.send, generated.document
+                        )
+                        print(
+                            "[runtime][motion] trajectory sent: "
+                            f"frames={len(generated.document['trajectory'])} "
+                            f"source={generated.source}"
+                        )
+                    except Exception as exc:
+                        self.last_error = exc
+                        print(
+                            "[runtime][motion][warning] trajectory send failed: "
+                            f"{type(exc).__name__}: {exc}"
+                        )
+            await audio_task
+        except asyncio.CancelledError:
+            audio_task.cancel()
+            raise
 
     async def _finish_turn(self, status: str) -> None:
         if self.active_turn is not None:

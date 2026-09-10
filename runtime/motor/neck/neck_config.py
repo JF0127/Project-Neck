@@ -63,3 +63,10 @@ pitch_center_deg = 0
 roll_center_deg = 0
 yaw_center_deg = 0
 det_eps = 0.000001
+
+# ==============================
+# Feedback
+# ==============================
+feedback.enabled = true
+feedback.socket_path = "/tmp/neck_feedback.sock"
+feedback.rate_hz = 30

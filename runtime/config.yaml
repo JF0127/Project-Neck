@@ -9,9 +9,9 @@ vad:
   min_silence_ms: 500
 asr:
   backend: whisper
-  model_path: models/whisper-base-ct2
-  device: cpu
-  language: en
+  model_path: models/whisper-large-v3-ct2
+  device: cuda
+  language: zh
 dialogue:
   backend: deepseek
   model: deepseek-v4-flash
@@ -20,10 +20,23 @@ dialogue:
   temperature: 0.7
 tts:
   backend: edge
-  voice: en-US-GuyNeural
+  voice: zh-CN-XiaoxiaoNeural
 runtime:
   dialogue_fallback_text: "抱歉，我刚才没有处理好，请再说一次。"
   cooldown_ms: 200
-motion: {}
-motor: {}
+motion:
+  enabled: true
+  model_path: models/baseline/model.pt
+  vocab_path: models/baseline/vocab.json
+  device: auto
+  generated_dir: generated
+  sync_offset_ms: 0
+motor:
+  feedback_enabled: true
+  feedback_socket: /tmp/neck_feedback.sock
+  feedback_stale_sec: 0.2
+  send_enabled: true
+  socket_path: /tmp/neck_model.sock
+  measurement_socket: /tmp/neck_measurement.sock
+  mock: false
 recorder: {}

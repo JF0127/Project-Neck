@@ -1,5 +1,6 @@
 #include "neck/neck_config.h"
 
+#include <cctype>
 #include <cmath>
 #include <fstream>
 #include <sstream>
@@ -49,11 +50,18 @@ bool readValues(const std::string& path, Values& values, std::string& error) {
         }
 
         const std::string key = trim(line.substr(0, separator));
-        const std::string value = trim(line.substr(separator + 1));
+        std::string value = trim(line.substr(separator + 1));
         if (key.empty() || value.empty()) {
             error = "line " + std::to_string(line_number) +
                     ": key and value must not be empty";
             return false;
+        }
+        // Optional matching quotes keep path values valid Python syntax, since
+        // this file is also parsed by generic source checks.
+        if (value.size() >= 2 &&
+            (value.front() == '"' || value.front() == '\'') &&
+            value.back() == value.front()) {
+            value = value.substr(1, value.size() - 2);
         }
         if (!values.emplace(key, value).second) {
             error = "line " + std::to_string(line_number) +
@@ -120,6 +128,28 @@ bool requireDouble(const Values& values, const std::string& key,
     }
 }
 
+bool requireBool(const Values& values, const std::string& key,
+                 bool& output, std::string& error) {
+    std::string text;
+    if (!requireString(values, key, text, error)) {
+        return false;
+    }
+    for (char& character : text) {
+        character = static_cast<char>(
+            std::tolower(static_cast<unsigned char>(character)));
+    }
+    if (text == "true" || text == "1") {
+        output = true;
+        return true;
+    }
+    if (text == "false" || text == "0") {
+        output = false;
+        return true;
+    }
+    error = "key '" + key + "' must be true/false or 1/0, got '" + text + "'";
+    return false;
+}
+
 bool loadMotor(const Values& values, int number, MotorConfig& motor,
                std::string& error) {
     const std::string prefix = "motor" + std::to_string(number) + ".";
@@ -138,7 +168,8 @@ std::unordered_set<std::string> knownKeys() {
         "network_interface", "slave_id", "ack_status",
         "pitch_min_deg", "pitch_max_deg", "roll_min_deg", "roll_max_deg",
         "yaw_min_deg", "yaw_max_deg", "c11", "c12", "c21", "c22", "k3",
-        "pitch_center_deg", "roll_center_deg", "yaw_center_deg", "det_eps"
+        "pitch_center_deg", "roll_center_deg", "yaw_center_deg", "det_eps",
+        "feedback.enabled", "feedback.socket_path", "feedback.rate_hz"
     };
     for (int number = 1; number <= 3; ++number) {
         const std::string prefix = "motor" + std::to_string(number) + ".";
@@ -229,6 +260,15 @@ bool validateConfig(const NeckConfig& config, std::string& error) {
         error = "k3 is too close to zero";
         return false;
     }
+    if (config.feedback.socket_path.empty()) {
+        error = "feedback.socket_path must not be empty";
+        return false;
+    }
+    if (!std::isfinite(config.feedback.rate_hz) ||
+        config.feedback.rate_hz <= 0.0 || config.feedback.rate_hz > 1000.0) {
+        error = "feedback.rate_hz must be finite and in (0, 1000]";
+        return false;
+    }
     return true;
 }
 
@@ -272,7 +312,10 @@ bool loadNeckConfig(const std::string& path,
         !requireDouble(values, "pitch_center_deg", loaded.pitch_center_deg, error_message) ||
         !requireDouble(values, "roll_center_deg", loaded.roll_center_deg, error_message) ||
         !requireDouble(values, "yaw_center_deg", loaded.yaw_center_deg, error_message) ||
-        !requireDouble(values, "det_eps", loaded.det_eps, error_message)) {
+        !requireDouble(values, "det_eps", loaded.det_eps, error_message) ||
+        !requireBool(values, "feedback.enabled", loaded.feedback.enabled, error_message) ||
+        !requireString(values, "feedback.socket_path", loaded.feedback.socket_path, error_message) ||
+        !requireDouble(values, "feedback.rate_hz", loaded.feedback.rate_hz, error_message)) {
         return false;
     }
 
@@ -282,4 +325,20 @@ bool loadNeckConfig(const std::string& path,
 
     config = loaded;
     return true;
+}
+
+bool loadDefaultNeckConfig(NeckConfig& config, std::string& error_message) {
+    const std::array<const char*, 2> paths = {
+        "neck/neck_config.py",
+        "../neck/neck_config.py"
+    };
+    for (const char* path : paths) {
+        std::ifstream probe(path);
+        if (probe.good()) {
+            return loadNeckConfig(path, config, error_message);
+        }
+    }
+    error_message =
+        "cannot find neck/neck_config.py (tried current and parent directories)";
+    return false;
 }

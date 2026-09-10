@@ -57,7 +57,9 @@ def load_config(path: Path) -> tuple[dict[str, Any], Path]:
 
 def build_runtime(config: dict[str, Any], config_path: Path):
     from .asr import WhisperASR
+    from .contracts import RobotState
     from .dialogue import DeepSeekDialogue
+    from .feedback import MotorFeedbackMonitor
     from .runtime import Runtime
     from .tts import EdgeTTS
     from .vad import SileroVAD
@@ -68,6 +70,8 @@ def build_runtime(config: dict[str, Any], config_path: Path):
     dialogue_config = _section(config, "dialogue")
     tts_config = _section(config, "tts")
     runtime_config = _section(config, "runtime")
+    motor_config = _section(config, "motor")
+    motion_config = _section(config, "motion")
 
     if vad_config.get("backend") != "silero":
         raise ValueError("Stage 3 requires vad.backend=silero")
@@ -101,6 +105,43 @@ def build_runtime(config: dict[str, Any], config_path: Path):
         temperature=float(dialogue_config.get("temperature", 0.7)),
     )
     tts = EdgeTTS(voice=str(tts_config.get("voice", "en-US-GuyNeural")))
+    robot_state = RobotState()
+
+    turn_generator = None
+    if bool(motion_config.get("enabled", False)):
+        from .inference import MotionProcessor, TurnGenerator
+        from .inference.baseline_v1 import BaselineV1Backend
+
+        backend = BaselineV1Backend(
+            model_path=_model_path(
+                config_path, _required(motion_config, "model_path", "motion")
+            ),
+            vocab_path=_model_path(
+                config_path, _required(motion_config, "vocab_path", "motion")
+            ),
+            device=str(motion_config.get("device", "auto")),
+        )
+        turn_generator = TurnGenerator(
+            backend=backend,
+            processor=MotionProcessor(),
+            output_dir=_model_path(
+                config_path, str(motion_config.get("generated_dir", "generated"))
+            ),
+            model_label=str(backend.model_path),
+        )
+
+    neck_sender = None
+    if bool(motor_config.get("send_enabled", False)):
+        from .neck_client import NeckClient
+
+        neck_sender = NeckClient(
+            socket_path=str(motor_config.get("socket_path", "/tmp/neck_model.sock")),
+            mock=bool(motor_config.get("mock", False)),
+            measurement_socket_path=str(
+                motor_config.get("measurement_socket", "/tmp/neck_measurement.sock")
+            ),
+        )
+
     runtime = Runtime(
         vad=vad,
         asr=asr,
@@ -110,15 +151,44 @@ def build_runtime(config: dict[str, Any], config_path: Path):
             _required(runtime_config, "dialogue_fallback_text", "runtime")
         ),
         cooldown_ms=int(runtime_config.get("cooldown_ms", 200)),
+        robot_state=robot_state,
+        turn_generator=turn_generator,
+        neck_sender=neck_sender,
+        motion_sync_offset_ms=int(motion_config.get("sync_offset_ms", 0)),
     )
-    return runtime, str(audio.get("host", "0.0.0.0")), int(audio.get("port", 8765))
+
+    monitor = None
+    if bool(motor_config.get("feedback_enabled", False)):
+        monitor = MotorFeedbackMonitor(
+            robot_state=robot_state,
+            socket_path=str(
+                motor_config.get("feedback_socket", "/tmp/neck_feedback.sock")
+            ),
+            stale_sec=float(motor_config.get("feedback_stale_sec", 0.2)),
+        )
+    return (
+        runtime,
+        monitor,
+        str(audio.get("host", "0.0.0.0")),
+        int(audio.get("port", 8765)),
+    )
+
+
+async def _serve(server, monitor) -> None:
+    if monitor is not None:
+        monitor.start()
+    try:
+        await server.serve_forever()
+    finally:
+        if monitor is not None:
+            await monitor.stop()
 
 
 def main() -> None:
     args = parse_args()
     try:
         config, config_path = load_config(args.config)
-        runtime, host, port = build_runtime(config, config_path)
+        runtime, monitor, host, port = build_runtime(config, config_path)
     except Exception as exc:
         raise SystemExit(f"runtime: error: {exc}") from None
 
@@ -126,7 +196,7 @@ def main() -> None:
 
     server = AudioWebSocketServer(runtime, host=host, port=port)
     try:
-        asyncio.run(server.serve_forever())
+        asyncio.run(_serve(server, monitor))
     except KeyboardInterrupt:
         print("[runtime] stopped")
 

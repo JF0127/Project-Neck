@@ -22,6 +22,7 @@ set(SOURCES motor_control.c
     transmit.cpp
     command.cpp
     neck/model_socket.cpp
+    neck/feedback_server.cpp
     neck/measured_rpy.cpp
     neck/neck_config.cpp
     neck/neck_motion.cpp

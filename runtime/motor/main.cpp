@@ -8,9 +8,11 @@
 #include <cstdio>
 #include <readline/readline.h>
 #include <map>
+#include <memory>
 
 #include "Console.hpp"
 #include "command.h"
+#include "neck/feedback_server.h"
 #include "neck/measured_rpy.h"
 #include "neck/model_socket.h"
 #include "neck/neck_motion.h"
@@ -91,6 +93,25 @@ int main()
         return 1;
     }
 
+    // Read-only 30 Hz pose stream; independent from the command path.
+    NeckConfig feedback_config;
+    std::string feedback_config_error;
+    std::unique_ptr<FeedbackServer> feedback_server;
+    if (loadDefaultNeckConfig(feedback_config, feedback_config_error))
+    {
+        if (feedback_config.feedback.enabled)
+        {
+            feedback_server = std::make_unique<FeedbackServer>(
+                feedback_config.feedback.socket_path,
+                feedback_config.feedback.rate_hz,
+                makeNeckFeedbackProvider(feedback_config));
+        }
+    }
+    else
+    {
+        std::cerr << "反馈服务配置加载失败: " << feedback_config_error << "\n";
+    }
+
     // 这里填自己电脑上的网卡
     EtherCAT_Init((char *)"enp4s0"); // enp4s0:
 
@@ -104,9 +125,22 @@ int main()
 
     startRun();
 
+    if (feedback_server != nullptr)
+    {
+        std::string feedback_error;
+        if (!feedback_server->start(feedback_error))
+        {
+            std::cerr << "反馈 Socket 启动失败: " << feedback_error << "\n";
+        }
+    }
+
     comThread = std::thread(comImpl);
     comThread.join();
 
+    if (feedback_server != nullptr)
+    {
+        feedback_server->stop();
+    }
     model_socket.stop();
     measurement_socket.stop();
     if (isTrajectoryExecuting())

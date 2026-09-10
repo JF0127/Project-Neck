@@ -39,6 +39,7 @@ Thumbs.db
 *.ckpt
 
 # Runtime deployment assets and generated records
+/runtime/generated/
 /runtime/models/*
 !/runtime/models/.gitkeep
 /runtime/experiments/*

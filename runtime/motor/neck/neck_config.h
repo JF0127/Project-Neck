@@ -17,6 +17,12 @@ struct MotorConfig {
     int current_param = 0;
 };
 
+struct FeedbackConfig {
+    bool enabled = true;
+    std::string socket_path = "/tmp/neck_feedback.sock";
+    double rate_hz = 30.0;
+};
+
 struct NeckConfig {
     std::string network_interface;
     int slave_id = 0;
@@ -41,6 +47,8 @@ struct NeckConfig {
     double roll_center_deg = 0.0;
     double yaw_center_deg = 0.0;
     double det_eps = 0.0;
+
+    FeedbackConfig feedback;
 };
 
 // Loads and validates the complete configuration. On failure, config is not
@@ -49,5 +57,10 @@ struct NeckConfig {
 bool loadNeckConfig(const std::string& path,
                     NeckConfig& config,
                     std::string& error_message);
+
+// Resolves and loads the single neck configuration, trying
+// "neck/neck_config.py" and then "../neck/neck_config.py" so the motor can be
+// launched from either the repository root or its build directory.
+bool loadDefaultNeckConfig(NeckConfig& config, std::string& error_message);
 
 #endif  // PROJECT_MOTOR_NECK_CONFIG_H
