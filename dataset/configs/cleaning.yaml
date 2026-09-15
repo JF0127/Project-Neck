@@ -1,0 +1,29 @@
+version: clean_v2
+
+models:
+  pose_path: models/yolo11n-pose.pt
+  pose_url: https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo11n-pose.pt
+  insightface_root: models/insightface
+  insightface_name: buffalo_l
+
+detection:
+  person_confidence: 0.35
+  pose_image_size: 960
+  shoulder_confidence: 0.40
+  face_detection_size: 640
+  face_edge_margin_ratio: 0.005
+  primary_min_person_area_ratio: 0.08
+  primary_tracking_similarity_threshold: 0.35
+  min_shoulder_to_face_width_ratio: 0.60
+  min_face_to_shoulder_gap_ratio: 0.02
+  max_face_to_shoulder_gap_ratio: 2.00
+
+classification:
+  identity_similarity_threshold: 0.45
+
+video_extensions:
+  - .mp4
+  - .mov
+  - .mkv
+  - .avi
+  - .webm

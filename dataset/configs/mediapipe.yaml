@@ -1,4 +1,0 @@
-# Paths are resolved relative to the project root.
-input: datasets/zhubo_shuo_lianbo/clean_v1/clips
-output: datasets/zhubo_shuo_lianbo/features/mediapipe_v1
-model: models/mediapipe/face_landmarker.task

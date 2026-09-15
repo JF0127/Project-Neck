@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from enum import Enum
+import time
 from typing import Awaitable, Callable, Protocol
 import uuid
 
@@ -77,6 +78,7 @@ class Runtime:
         self.last_error: Exception | None = None
         self._send_robot_audio: RobotAudioSender | None = None
         self._turn_task: asyncio.Task[None] | None = None
+        self._turn_timing: dict[str, float] = {}
 
     def start_session(self, session_id: str | None = None) -> SessionContext:
         if self.session is not None:
@@ -105,6 +107,7 @@ class Runtime:
         if not identifier:
             raise ValueError("turn_id must not be empty")
         self.active_turn = TurnContext(turn_id=identifier, status="listening")
+        self._turn_timing = {}
         return self.active_turn
 
     def complete_turn(self, status: str = "complete") -> TurnSummary:
@@ -184,6 +187,23 @@ class Runtime:
             # keeps an equivalent minimal VAD implementation usable.
             self.start_turn()
         assert self.active_turn is not None
+        vad_end_perf = time.perf_counter()
+        self._turn_timing["vad_end_perf"] = vad_end_perf
+        speech_end_perf = getattr(self.vad, "last_speech_end_perf", None)
+        vad_delay = getattr(self.vad, "last_end_delay_sec", None)
+        if isinstance(speech_end_perf, float):
+            self._turn_timing["speech_end_perf"] = speech_end_perf
+        if isinstance(vad_delay, float):
+            print(
+                f"[runtime][timing] turn={self.active_turn.turn_id} "
+                f"vad_end_delay_sec={vad_delay:.6f} "
+                f"vad_end_perf={vad_end_perf:.6f}"
+            )
+        else:
+            print(
+                f"[runtime][timing] turn={self.active_turn.turn_id} "
+                f"vad_end_delay_sec=unavailable vad_end_perf={vad_end_perf:.6f}"
+            )
         self.active_turn.user_audio = user_audio
         self.active_turn.status = "processing"
         self.state = RuntimeState.PROCESSING
@@ -197,7 +217,16 @@ class Runtime:
             return
 
         try:
-            user_speech = await asyncio.to_thread(self.asr.transcribe, turn.user_audio)
+            stage_started = time.perf_counter()
+            try:
+                user_speech = await asyncio.to_thread(
+                    self.asr.transcribe, turn.user_audio
+                )
+            finally:
+                print(
+                    f"[runtime][timing] turn={turn.turn_id} "
+                    f"asr_sec={time.perf_counter() - stage_started:.6f}"
+                )
             turn.user_speech = user_speech
             if not user_speech.text.strip():
                 await self._finish_turn("empty_speech")
@@ -205,15 +234,28 @@ class Runtime:
 
             request = DialogueRequest.from_session(user_speech.text, session)
             used_fallback = False
+            stage_started = time.perf_counter()
             try:
                 robot_text = await asyncio.to_thread(self.dialogue.reply, request)
             except DialogueError as exc:
                 self.last_error = exc
                 robot_text = self.dialogue_fallback_text
                 used_fallback = True
+            finally:
+                print(
+                    f"[runtime][timing] turn={turn.turn_id} "
+                    f"deepseek_sec={time.perf_counter() - stage_started:.6f}"
+                )
             turn.robot_text = robot_text
 
-            robot_speech = await self.tts.synthesize(robot_text)
+            stage_started = time.perf_counter()
+            try:
+                robot_speech = await self.tts.synthesize(robot_text)
+            finally:
+                print(
+                    f"[runtime][timing] turn={turn.turn_id} "
+                    f"tts_sec={time.perf_counter() - stage_started:.6f}"
+                )
             if not isinstance(robot_speech, RobotSpeech):
                 raise TypeError("TTS must return RobotSpeech")
             turn.robot_speech = robot_speech
@@ -221,11 +263,22 @@ class Runtime:
             self.state = RuntimeState.OUTPUTTING
 
             if self.turn_generator is None:
+                print(
+                    f"[runtime][timing] turn={turn.turn_id} "
+                    "motion_sec=0.000000 status=disabled"
+                )
                 await sender(robot_speech)
             else:
-                generated, used_fallback = await self._generate_turn(
-                    turn, used_fallback
-                )
+                stage_started = time.perf_counter()
+                try:
+                    generated, used_fallback = await self._generate_turn(
+                        turn, used_fallback
+                    )
+                finally:
+                    print(
+                        f"[runtime][timing] turn={turn.turn_id} "
+                        f"motion_sec={time.perf_counter() - stage_started:.6f}"
+                    )
                 turn.robot_speech = generated.speech
                 await self._play_turn(generated, sender)
             await self._finish_turn(
@@ -279,6 +332,25 @@ class Runtime:
                 f"{type(exc).__name__}: {exc}",
             )
             return generated, True
+
+    def robot_audio_send_started(self) -> None:
+        """Record the server time immediately before robot stream_start."""
+        now = time.perf_counter()
+        turn_id = self.active_turn.turn_id if self.active_turn is not None else "unknown"
+        speech_end = self._turn_timing.get("speech_end_perf")
+        vad_end = self._turn_timing.get("vad_end_perf")
+        speech_end_to_send = (
+            f"{now - speech_end:.6f}" if speech_end is not None else "unavailable"
+        )
+        vad_end_to_send = (
+            f"{now - vad_end:.6f}" if vad_end is not None else "unavailable"
+        )
+        print(
+            f"[runtime][timing] turn={turn_id} "
+            f"robot_audio_send_start_perf={now:.6f} "
+            f"speech_end_to_send_sec={speech_end_to_send} "
+            f"vad_end_to_send_sec={vad_end_to_send}"
+        )
 
     async def _play_turn(
         self, generated: GeneratedTurn, sender: RobotAudioSender

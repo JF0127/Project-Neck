@@ -19,6 +19,7 @@ class PlaybackStats:
     underruns: int
     max_queue_depth: int
     callback_statuses: int
+    first_playback_perf: Optional[float] = None
 
 
 class AudioPlayback:
@@ -37,6 +38,7 @@ class AudioPlayback:
         self.max_queue_depth = 0
         self.callback_statuses = 0
         self.last_callback_status = ""
+        self.first_playback_perf: Optional[float] = None
         self._stream: Optional[Any] = None
         self._started = False
         self._receiving = True
@@ -76,6 +78,8 @@ class AudioPlayback:
             if self._receiving:
                 self.underruns += 1
             return
+        if self.first_playback_perf is None:
+            self.first_playback_perf = time.perf_counter()
         outdata[:] = frame
         self.played_frames += 1
 
@@ -124,6 +128,7 @@ class AudioPlayback:
             underruns=self.underruns,
             max_queue_depth=self.max_queue_depth,
             callback_statuses=self.callback_statuses,
+            first_playback_perf=self.first_playback_perf,
         )
 
     def close(self) -> None:

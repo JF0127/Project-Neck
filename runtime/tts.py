@@ -2,19 +2,28 @@
 from __future__ import annotations
 
 import io
-from typing import Any, Callable
+from typing import Any, Callable, Protocol
 
 import numpy as np
 
 from .contracts import RobotSpeech, WordTimestamp
+from .logging_utils import log
 
 SAMPLE_RATE = 16_000
 SAMPLES_PER_FRAME = 320
 BYTES_PER_FRAME = 640
 
 
+class TTS(Protocol):
+    provider: str
+
+    async def synthesize(self, robot_text: str) -> RobotSpeech: ...
+
+
 class EdgeTTS:
     """Synthesize text as 16 kHz mono raw PCM s16le with word boundaries."""
+
+    provider = "edge"
 
     def __init__(
         self,
@@ -82,7 +91,7 @@ class EdgeTTS:
 
         self.synthesis_count += 1
         duration_sec = len(pcm_s16le) / 2 / SAMPLE_RATE
-        print(
+        log(
             f"[runtime][tts] synthesis #{self.synthesis_count}: "
             f"samples={len(pcm_s16le) // 2}, words={len(words)}, "
             "format=16k/mono/pcm_s16le"

@@ -17,13 +17,13 @@ runtime/    Model Package + Real Input → Robot Behavior
 tools/      项目级分析/可视化工具
 ```
 
-边界：三个领域不通过源码互相耦合。Algorithm 通过冻结 artifact 消费 Dataset；Runtime 只加载部署包（TorchScript），**不 import `algorithm` 训练源码**（`runtime/inference/baseline_v1.py` 即该契约的实现）。
+边界：三个领域不通过源码互相耦合。Algorithm 通过 artifact 消费 Dataset；Runtime 只加载部署包（TorchScript），**不 import `algorithm` 训练源码**（`runtime/inference/baseline_v1.py` 即该契约的实现）。
 
 ## 2. 当前状态（以代码为准）
 
 | 领域 | 状态 |
 |---|---|
-| Dataset V1 | **完成并冻结**：`clean_v1` → `mediapipe_v1` → `neck_pose_v1` / `speech_v1` → `fragment_v1_2_1` → `split_v1`。当前 51 unique source、57 clean clips、471 fragments、约 1.55 h；split 36/10/5 sources，无泄漏 |
+| Dataset | Clean V2 首帧以最大人物锁定主主持人，后续用人脸 identity 逐帧跟踪；忽略画中画/附加窗口内的其他人物和脸。主主持人首次出现完整脸或脖子不可用时，保留此前有效前缀，删除失败帧及之后全部内容；仅第 0 帧失败等无有效前缀情况才淘汰。输出由模型自动分男女并按主播人脸 embedding 聚类 |
 | Algorithm | Baseline V1（audio+text → 30 fps `rpy_offset`）已实现；训练产物在 `algorithm/outputs/`（gitignored）。部署包 `runtime/models/baseline/{model.pt,vocab.json,config.yaml}`（TorchScript，gitignored） |
 | Runtime | 语音链 + 动作链 + 实时姿态反馈已跑通真机（见 §3）。生成产物在 `runtime/generated/`（gitignored） |
 | Motor | SOEM EtherCAT 主站；三电机；`model` / `measurement` / `feedback` 三个 UDS；速度后处理。反馈需先手动归零（§4.4） |
@@ -35,7 +35,7 @@ tools/      项目级分析/可视化工具
 
 ```text
 生成 + 执行（每轮）:
-  user PCM ─→ VAD ─→ ASR(zh, faster-whisper large-v3) ─→ DeepSeek ─→ Edge TTS
+  user PCM ─→ VAD ─→ ASR(zh, faster-whisper large-v3) ─→ DeepSeek ─→ Doubao TTS V3
                                                                         │
                      ┌──────────────────────────────────────────────────┤
                      │  robot.wav / metadata.json                       │  PCM
@@ -103,6 +103,8 @@ Runtime 侧 0.2 s 无消息即判定 stale（`head_rpy_valid=false`）。
 NeckPoseSet 0 0 0 0
 ```
 
+单电机角度查询命令为 `MotorAngleGet <SlaveId> <PassAge> <MotorId>`，复用电机参数查询协议并输出实际角度。
+
 位置帧常驻后反馈持续有效；冷启动姿态不通过查询轮询解决，属于操作规程。
 
 ### 4.5 Motor Socket 汇总
@@ -113,36 +115,112 @@ NeckPoseSet 0 0 0 0
 | `/tmp/neck_feedback.sock` | Motor → Runtime | 30 Hz 姿态 NDJSON |
 | `/tmp/neck_measurement.sock` | Runtime → Motor | 配置测量输出（可选，记录执行期实测 RPY） |
 
-## 5. Dataset V1 关键契约（摘要）
+## 5. Dataset 接口
 
-详细历史契约见 git 历史中的 `dataset/AGENTS.md`，以下为训练/消费必须遵守的部分。
+### 5.1 Clean V2 有效前缀清洗与主播归类
 
-- **ID 层级**：`source_video_id` → `<source_video_id>_<shot:04d>`（clip）→ `<clip_id>_f<idx:04d>`（fragment）。Split 必须按 `source_video_id` 分组。
-- **时间/单位**：全部 seconds；RPY 为 radian。Clean 之后的时间轴都是 clip-local；fragment 同时保存 source timeline 与 local timeline。
-- **Neck GT（`neck_pose_v1`）**：`R_rel(t) = R0.T @ R(t)`（R0 为该 clip 首个 valid MediaPipe 帧）；语义轴映射 `roll = yaw_z`、`pitch = roll_x`、`yaw = pitch_y`；内部短 gap 用 SLERP（≤0.20 s）；按 final-valid run 做 1.5 Hz 零相位 Butterworth；invalid 保持 NaN，不压缩时间轴。
-- **Fragment（`fragment_v1_2_1`）**：variable-length spoken utterance；阈值 `min 2.0s / strong_pause 0.45s / soft_max 20s / absolute_max 30s`；audio 16 kHz mono s16；neck 只做切片，不重算归一化/滤波/插值。
-- **Split（`split_v1`）**：seed 42、70/20/10、按 source 分组。**禁止 random fragment split**；不得重新分配现有 source；训练统计量只从 Train 估计。
-- **训练 target**：`rpy_offset = neck_rpy - neck_rpy[0]`，invalid mask 与 padding mask 分开；不得把 NaN 当 0。
-- **禁止隐式重算**：DataLoader / 训练代码不得触发 download、clean、mediapipe、ASR、neck pose、fragment、split。
+`src/processing/clean_videos.py` 的输入是原始视频目录，输出是新的完整目录；不改写输入。首个解码帧以检测框面积最大的 person 锁定主主持人，并要求其面积达到画面阈值；person/face 关联允许 YOLO Pose 的人物框从脖子开始而省略头部（横向扩展 10%、向上扩展人物框高度的 35%）。后续帧只接受与累计主主持人 ArcFace embedding 达到 tracking cosine threshold 的 person/face 配对；同一张主脸关联到多个 pose box 时，优先选择双肩与脖子证据最强的框。画中画、新闻素材窗口和其他附加窗口里的非主主持人人物/人脸全部忽略，不因全画面人数或脸数大于 1 而停止。
+
+逐一解码并检查**每一帧**；主主持人首次无法继续匹配、主主持人脸触边而不完整、主主持人双肩关键点不足，或主主持人脸—双肩几何不能支持脖子可见时，保留 `[0, failure_frame)`，删除失败帧及之后全部内容，即使主持人后续恢复也不再保留。截断前缀用 ffmpeg 精确到失败帧时间重新编码为 MP4；从未失败的完整视频原样复制。只有第 0 帧失败、空视频、损坏视频等没有可用前缀时才写入 rejected。YOLO11 Pose 提供 person 与双肩，InsightFace `buffalo_l` 检测脸、跟踪主主持人 identity、预测男女并生成聚类 embedding。这里“脖子可见”是脸框与双肩关键点的模型几何判定，不是像素级脖子分割。
+
+合格视频按主主持人的模型预测结果分为 `male/female`，再在各性别内按视频平均归一化 embedding 和 cosine threshold 贪心聚类为匿名 `anchor_XXXX`。输出结构：
+
+```text
+<output>/
+├── male/anchor_0001/<source_id>.<ext>
+├── female/anchor_0001/<source_id>.<ext>
+├── accepted.jsonl
+├── truncated.jsonl            # 被截断但保留有效前缀的视频及停止原因
+├── truncated_details/<source_id>.json
+├── rejected.jsonl             # 无有效前缀视频的原因与证据
+├── rejected_details/<source_id>.json
+├── diagnostic_previews/       # 首个失败帧；标出 person/face 框、帧号和时间
+└── manifest.json              # complete=true 才表示发布完成
+```
+
+输出以 staging directory 构建后原子发布；已有输出必须显式传 `--force` 才会整体替换。每条截断或淘汰记录会立即写入 staging 下对应 JSONL 和独立 details JSON，因此中断后仍可检查已处理视频；诊断必须给出原因码、中文原因、首个失败帧、视频秒数、保留帧数/时长、画面尺寸、检测到的 person/face 数量及框、相关置信度/几何值与对应阈值。模型阈值集中在 `dataset/configs/cleaning.yaml`。Pose 权重首次缺失时下载至 `dataset/models/`；InsightFace 首次初始化时下载 `buffalo_l` 到同一模型根目录。Dataset 依赖 `onnxruntime-gpu`；CUDA 模式要求 Torch CUDA 与 ONNX Runtime CUDA provider 同时可用，GPU 包也保留 CPU provider 供显式回退。清洗结果是模型判定，失败帧预览用于审查误检。
+
+### 5.2 人工标注真源
+
+最终人工句子标注只消费人工审核完成的标注包，不允许未经审核的模型文本、语音边界或句子边界直接成为训练真源。允许使用本地 ASR 生成 `review.status=pending` 的单视频粗标注 JSON 供人工校正；粗标注不是人工标注包，后续 fragment、RPY 和训练处理不得在审核完成前消费它。`dataset/src/crawler/` 仅负责原始视频采集，不参与标注。
+
+每个标注包结构固定为：
+
+```text
+<package>/
+├── metadata.jsonl             # 必需，权威机器接口
+├── segments/                  # 必需，人工边界切出的 WAV
+│   └── <segment_id>.wav
+├── metadata.csv               # 可选，仅供人工查看
+└── README.txt                 # 可选，不作为机器接口
+```
+
+`metadata.jsonl` 每行一个 UTF-8 JSON object，字段必须且只能按以下语义使用：
+
+```json
+{"id":"Test_0000_001","source":"Test_0000.wav","file":"segments/Test_0000_001.wav",
+ "start_sec":0.0,"end_sec":2.31,"duration_sec":2.31,"text":"主播说联播，今天我来说。"}
+```
+
+| 字段 | 契约 |
+|---|---|
+| `id` | 包内唯一、非空的片段 ID；派生产物沿用该 ID |
+| `source` | 无目录分量的源 WAV 文件名；同一 JSONL 内必须一致 |
+| `file` | 包内相对 WAV 路径，不允许绝对路径或 `..` |
+| `start_sec/end_sec` | 源音频时间轴上的人工边界，秒；递增、不得重叠，允许人工明确保留间隙 |
+| `duration_sec` | `end_sec - start_sec`，误差不超过 1 ms |
+| `text` | 人工确认的非空原文；标点属于标注内容 |
+
+片段音频固定为 16,000 Hz、mono、signed 16-bit PCM WAV；文件实际时长与 `duration_sec` 误差不超过 1.5 sample。行顺序就是源时间顺序。`metadata.csv` 和 `README.txt` 不得反向覆盖 JSONL。
+
+### 5.3 派生 RPY 接口
+
+`extract_neck_rpy.py` 只按人工边界切分视觉特征，不改变标注。调用方必须保证传入视频与 `source` WAV 共用同一个从 0 开始的时间轴。输出 `<rpy_root>/<id>/{rpy,roll,pitch,yaw}.npz` 和根目录 `manifest.json`：
+
+- `rpy.npz`：`video_timestamps: float64[N]`、`local_timestamps: float64[N]`、`valid: bool[N]`、`values: float32[N,3]`、`order=[roll,pitch,yaw]`、`unit=radian`。
+- 单轴 NPZ：相同时间戳和 valid，`values: float32[N]`。
+- 不压缩帧时间轴；检测失败保留该帧并以 `valid=false`、`values=NaN` 表示。
+- 当前姿态参考为源视频第 0 帧：`R_rel(t) = R_frame0.T @ R(t)`。这是视觉派生特征，不是人工文本标注。
+
+`extract_fragment_rpy.py` 消费人工审核后的同目录 `<stem>.corrected_fragments.json`，要求 `timeline=original_audio_video`、`time_unit=second`，且 `review.status` 为 `human_corrected` 或 `human_segmented`。它按 `fragments[{id,start_time,end_time,duration,text}]` 从同名 MP4 逐帧提取，在相邻 `<stem>.neck_rpy/` 下按 fragment ID 写入相同 `{rpy,roll,pitch,yaw}.npz` 接口及根 `manifest.json`；参考姿态同样固定为视频第 0 帧，检测失败帧保留为 invalid/NaN。默认使用 MediaPipe GPU delegate（Linux EGL/OpenGL ES，在当前 NVIDIA GPU 上运行，并非 Torch CUDA backend），可显式传 `--device cpu` 回退。输出通过 staging directory 原子发布，已有输出默认拒绝覆盖，仅显式 `--force` 时替换。该 corrected-fragments JSON 是当前人工审核边界接口，但在片段 WAV 和 canonical `metadata.jsonl` 建成前仍不等同于最终训练标注包。
+
+`visualize_slices.py` 联合检查人工音频、文本和 RPY；`visualize_roll_atoms.py` 只是候选动作诊断，不写回人工标注，也不是训练标签接口。
+
+### 5.4 单句人工动作真机测试 fixture
+
+`processing_test/Test_0000_motion_test/generate.py` 为 `Test_0000_001` 手工定义三轴 HOLD/MOVE；`Test_0000_002/generate.py` 生成 002；`generate_003_005.py` 生成 003～005。每条输出各自目录下的 `{trajectory.json,trajectory.png}`，固定 30 fps、radian、`[roll,pitch,yaw]`、`speaking`，MOVE 使用 smoothstep 连接，带符号 MOVE 角度按相对上一姿态的变化量累计，定义本身不来自 RPY 自动检测。001/002 分别为 69/112 帧；003/004/005 分别为 322/201/95 帧，终态依次为 `[0,-1,0]°`、`[0,0,0]°`、`[5,2,-2]°`。`combine_001_005.py` 不增加过渡或停顿，按顺序原样拼接为 799 帧（26.633 s）的 `Test_0000_001_005`。Motor 手工测试副本为 `runtime/motor/trajectories/Test001.json`～`Test005.json` 和 `Test001_005.json`，JSON 内部 name 与文件名一致。`plot_raw_references.py` 为 `Test_0000_001`～`005` 各生成一张共享时间轴的人工文本、原始 WAV 波形和原始逐帧 RPY 图到 `raw_references/`；除显示用 rad→degree 换算外，不做平滑、插值、滤波或动作提取。`trajectory.json` 是可被 Motor 接受的绝对零中心 RPY 文档，但生成/验证步骤不得连接 socket；真机发送仍须遵守 §9 和用户明确授权。
+
+### 5.5 单视频目录与音频提取
+
+`prepare_video_audio.py` 将指定目录下每个顶层 MP4 移入同名子目录，并从完整音轨提取同名 WAV；输出音频固定为 16,000 Hz、mono、signed 16-bit PCM。音频先在 staging directory 中生成并验证，成功后才移动原 MP4 和原子发布该视频目录；已有同名目录时拒绝覆盖。当前以 `clean_v2/male/kanghui` 为测试组。
+
+### 5.6 本地 ASR 粗标注
+
+`rough_transcribe.py` 使用 `dataset/models/asr/{paraformer-zh,fsmn-vad,ct-punc}` 对指定目录内同名 MP4/WAV 对进行离线中文识别，每个视频原子写入一个同名 `rough_transcript_v1` JSON。JSON 使用完整音视频的秒时间轴，包含带标点的 `segments[{id,start_sec,end_sec,text}]`，并固定标记 `review.status=pending`；已有 JSON 默认拒绝覆盖，只有明确传入 `--force` 才能替换。该输出仅是人工审核初稿。
+
+`qwen_transcribe.py` 递归处理指定目录内的 16 kHz mono PCM s16 WAV，使用本地 `models/qwen` Qwen3-ASR-1.7B 和 `models/qwen3-forced-aligner`，固定 `language=Chinese` 并启用 forced alignment。每个 WAV 在原目录旁原子写入 `<stem>.qwen_asr_v1.json`，保留完整 `text` 与字级 `timestamps[{text,start_time,end_time}]`，并固定标记 `review.status=pending`；默认拒绝覆盖任何已有 Qwen JSON，只有显式 `--force` 才替换。该结果只供人工组装和审核，不是人工标注真源。
+
+Algorithm 暂无可用训练入口，不得从训练代码隐式触发任何 Dataset 处理。
 
 ## 6. 目录结构
 
 ```text
 Project-Neck/
 ├── AGENTS.md                  # 唯一维护文档
-├── dataset/                   # 数据生产（V1 冻结）
-│   ├── configs/               # youtube.yaml, mediapipe.yaml
-│   ├── models/                # mediapipe task、faster-whisper-large-v3（gitignored）
-│   ├── datasets/zhubo_shuo_lianbo/   # 全部 artifact（gitignored）
-│   ├── src/                   # crawler / cleaning / features / fragments / splits / cli.py
-│   └── tests/                 # 已删除
+├── dataset/                   # 原始采集 + 人工标注消费
+│   ├── configs/               # youtube.yaml（采集）、cleaning.yaml（Clean V2）
+│   ├── datasets/zhubo_shuo_lianbo/  # videos/、人工标注包、派生产物（gitignored）
+│   ├── models/                # mediapipe、FunASR、Qwen3-ASR 与 forced aligner 本地模型
+│   └── src/
+│       ├── crawler/           # 原始视频采集
+│       └── processing/        # Clean V2、人工包校验、RPY 派生、诊断可视化
 ├── algorithm/                 # 训练与部署导出（当前 Baseline V1）
 │   ├── configs/baseline.yaml
 │   ├── data/ features.py models/ losses.py metrics.py train.py
 │   └── tests/                 # 已删除
 ├── runtime/                   # 真机在线运行
 │   ├── __main__.py runtime.py contracts.py config.yaml
-│   ├── audio_server.py asr.py vad.py dialogue.py tts.py
+│   ├── audio_server.py asr.py vad.py dialogue.py datetime_tool.py web_search.py tts.py doubao_tts.py logging_utils.py
 │   ├── feedback.py            # 实时姿态 monitor
 │   ├── neck_client.py         # motor JSON 发送
 │   ├── inference/             # 模型 I/O 与产物（原 motion_core）
@@ -197,6 +275,23 @@ ctest --test-dir runtime/motor/build --output-on-failure
 sudo ./runtime/motor/build/master_stack_test
 # 控制台：NeckPoseSet <SlaveId> <Pitch> <Roll> <Yaw>（度）、NeckSequence <name>、NeckSequenceStop
 
+# Audio 目录内的独立 Qwen3-ASR 常驻模块（暂不接 VAD/WebSocket；单进程内所有 WAV 复用一次模型加载）
+cd runtime/audio
+source .venv/bin/activate
+python -m runtime.qwen_asr /path/to/audio.wav
+# 固定 WAV 的 vLLM streaming 诊断：转为 16 kHz mono float32，warmup 后按 100 ms 实时时序模拟输入
+python -m runtime.qwen_asr_streaming
+
+# Ubuntu：Mac PCM → Silero VAD → Qwen3-ASR vLLM streaming → DeepSeek Responses + 本地 web_search → 完整 Doubao TTS V3 → Mac 播放（不接动作）
+cd runtime/audio
+source .venv/bin/activate
+export DEEPSEEK_API_KEY="<your-key>"
+export TAVILY_API_KEY="<your-key>"  # web_search 后端
+export VOLCENGINE_TTS_API_KEY="<your-key>"
+export VOLCENGINE_TTS_SPEAKER="zh_female_vv_uranus_bigtts"  # 可选，未设置时即使用此默认值
+python tools/qwen_streaming_server.py
+# 仅诊断 DeepSeek Responses event 时追加 --debug-deepseek-events
+
 # Audio 客户端（Mac；服务端需先运行）
 cd runtime/audio
 brew install portaudio
@@ -205,21 +300,66 @@ pip install -r requirements.txt
 export no_proxy="10.255.0.35,127.0.0.1,localhost"; export NO_PROXY="$no_proxy"  # 有代理时必须
 python3 -m runtime.main check-config
 python3 -m runtime.main capture-test --duration 3 --output /tmp/capture.wav
+python3 -m runtime.main asr-stream       # 单连接持续多轮：采集 → 接收完整 robot stream → 播放 → 恢复采集
 python3 -m runtime.main stream-test --duration 5 --wait-for-robot
 python3 -m runtime.main duplex-test --turns 2 --duration 5
+# 自然多轮半双工对话（单连接持续运行，服务端 VAD 分轮，Ctrl+C 停止）
+python3 -m runtime.main conversation
 ```
 
-默认连接 `ws://10.255.0.35:8765`（可用 `AUDIO_MODULE_WS_URL` 或 `--url` 覆盖）。
+默认连接 `ws://10.255.0.35:8765`（可用 `AUDIO_MODULE_WS_URL` 或 `--url` 覆盖）。`conversation` 与当前 `asr-stream` 都在一个 WebSocket 上持续多轮半双工运行，不逐轮重连：监听期持续发送麦克风 PCM，收到机器人 `stream_start` 后停止本轮采集；Ubuntu 在完整 TTS PCM 就绪后无实时 pacing 地快速发送 `stream_start`、全部音频帧和 `stream_end`，Mac 收到完整 `stream_end` 后才开始播放，播放完成后恢复麦克风。日志分别记录 `speech_duration`（speech_start→speech_end）、`asr_finalize_latency`（speech_end→ASR FINAL）、`audio_duration`、`network_send_time`、`playback_start/end`、`microphone_resume` 与连接关闭原因。跨机器时钟不可直接比较。
 
-### 7.3 Dataset（V1 已完成，重跑需明确授权）
+### 7.3 Dataset
 
 ```bash
 cd dataset
-python -m src.cli --help
-# discover / validate / download / clean
-# extract-mediapipe / validate-neck-pose / compare-neck-smoothing / extract-neck-pose
-# extract-speech / build-fragments / build-split
+python -m src.cli --help                 # discover / validate / download / clean
+
+# 对每一帧做严格筛选；首次失败前的有效前缀保留，不下载新原片
+python -m src.cli clean \
+  --input datasets/zhubo_shuo_lianbo/videos \
+  --output datasets/zhubo_shuo_lianbo/clean_v2
+# 重建现有输出需显式添加 --force；快速软件检查可用 --limit N
+
+# 每个 MP4 建立同名目录，并提取 16 kHz mono PCM s16 WAV
+python -m src.processing.prepare_video_audio \
+  --input datasets/zhubo_shuo_lianbo/clean_v2/male/kanghui
+
+# 本地 FunASR 粗标注；每个视频写入同名 pending-review JSON
+python -m src.processing.rough_transcribe \
+  --input datasets/zhubo_shuo_lianbo/clean_v2/male/kanghui/Test
+
+# 本地 Qwen3-ASR + forced aligner；递归写入相邻的 *.qwen_asr_v1.json
+python -m src.processing.qwen_transcribe \
+  --input datasets/zhubo_shuo_lianbo/clean_v2/male/kanghui
+
+ANN=datasets/zhubo_shuo_lianbo/processing_test/Test_0000_manual_v1/metadata.jsonl
+VIDEO=datasets/zhubo_shuo_lianbo/videos/Test.mp4
+RPY=datasets/zhubo_shuo_lianbo/processing_test/Test_0000_manual_rpy
+
+# 必须先验证人工包；失败时不得继续派生
+python -m src.processing.manual_annotations --annotations "$ANN"
+python -m src.processing.extract_neck_rpy --video "$VIDEO" --annotations "$ANN" --output "$RPY"
+
+# 按人工审核后的 corrected fragments 批量提取每句 RPY
+python -m src.processing.extract_fragment_rpy \
+  --input datasets/zhubo_shuo_lianbo/clean_v2/male/kanghui
+
+python -m src.processing.visualize_slices --annotations "$ANN" --rpy-root "$RPY" \
+  --output datasets/zhubo_shuo_lianbo/processing_test/Test_0000_manual_visualization
+python -m src.processing.visualize_roll_atoms --annotations "$ANN" --rpy-root "$RPY" \
+  --output datasets/zhubo_shuo_lianbo/processing_test/Test_0000_manual_roll_visualization
+
+# 生成 001～005 的无处理人工设计参考图
+python datasets/zhubo_shuo_lianbo/processing_test/Test_0000_motion_test/plot_raw_references.py
+# 生成 001～005 的人工动作 JSON/PNG，不发送到 Motor
+python datasets/zhubo_shuo_lianbo/processing_test/Test_0000_motion_test/generate.py
+python datasets/zhubo_shuo_lianbo/processing_test/Test_0000_motion_test/Test_0000_002/generate.py
+python datasets/zhubo_shuo_lianbo/processing_test/Test_0000_motion_test/generate_003_005.py
+python datasets/zhubo_shuo_lianbo/processing_test/Test_0000_motion_test/combine_001_005.py
 ```
+
+以上处理接口适用于同格式的任意人工标注包，不再硬编码 `Test.mp4`。所有派生步骤采用 staging directory 后原子替换输出，不覆盖人工标注包。
 
 ### 7.4 Algorithm 训练
 
@@ -228,11 +368,13 @@ source runtime/.venv/bin/activate
 python -m algorithm.train --config algorithm/configs/baseline.yaml --epochs 50
 ```
 
-- 数据入口：`dataset/datasets/zhubo_shuo_lianbo/splits/split_v1/{train,val,test}.jsonl`。
+- 原 Dataset 训练入口已删除；新处理 artifact 完成前，该训练命令没有可用的数据入口。
 - 输出：`algorithm/outputs/<experiment>/run_<timestamp>_seed42/`（checkpoint、config、vocab、metrics）。
 - 部署包生成：`runtime/models/baseline/{model.pt,vocab.json,config.yaml}` 由 Algorithm 导出（历史导出脚本未入当前仓库；Runtime 只消费该产物，接口见 `runtime/models/baseline/config.yaml` 的 `input_contract: baseline_tensor_v1`）。
 
 ## 8. 配置速查
+
+`dataset/configs/cleaning.yaml`：模型路径、YOLO Pose 推理尺寸（默认 960）、person/shoulder/face/neck 几何阈值、主主持人首帧最小面积、逐帧 identity tracking cosine 阈值、跨视频 identity 聚类阈值和支持的视频扩展名。默认严格检查每个解码帧，该行为不可通过采样参数放宽；非主主持人的附加窗口内容不参与验收、性别判断或聚类。
 
 `runtime/config.yaml`：
 
@@ -240,13 +382,13 @@ python -m algorithm.train --config algorithm/configs/baseline.yaml --epochs 50
 |---|---|
 | `vad` | `backend: silero`, `model_path`, `threshold`, `min_speech_ms`, `min_silence_ms` |
 | `asr` | `backend: whisper`, `model_path`（large-v3 CT2）, `device: cuda/cpu`, `language: zh` |
-| `dialogue` | `backend: deepseek`, `model`, `base_url`, `timeout_sec`, `temperature` |
-| `tts` | `backend: edge`, `voice`（中文） |
+| `dialogue` | `backend: deepseek`, `model`（当前 `deepseek-flash` / DeepSeek-V4.1-Flash，Responses API streaming，`max_output_tokens=4096`、`reasoning.effort=none`；纯当前日期时间强制使用 `zoneinfo.ZoneInfo("Asia/Shanghai")` 的本地 `get_current_datetime`（UTC+08:00，禁止搜索或由模型自行推算/转换），天气/新闻等实时互联网信息使用本地 `web_search`（含“今天/目前/当前/最近”时自动加入上海绝对日期，每轮最多 3 次），普通静态知识自动跳过工具；默认自然口语简洁回答，用户明确要求时才展开细节）, `base_url`, `timeout_sec`, `temperature` |
+| `tts` | `backend: doubao`（默认，V3 HTTP Chunked、`seed-tts-2.0`、16 kHz mono PCM；speaker 来自 `VOLCENGINE_TTS_SPEAKER`，默认 `zh_female_vv_uranus_bigtts`）；可切回 `edge` 并使用 `voice` |
 | `motion` | `enabled`, `model_path`, `vocab_path`, `device`, `generated_dir`, `sync_offset_ms` |
 | `motor` | `feedback_enabled`, `feedback_socket`, `feedback_stale_sec`, `send_enabled`, `socket_path`, `measurement_socket`, `mock` |
 | `runtime` | `dialogue_fallback_text`, `cooldown_ms` |
 
-`runtime/motor/neck/neck_config.py`（motor 唯一硬件配置）：`network_interface`、`slave_id`、三电机 `passage/id/min/max/center/max_velocity/speed_param/current_param`、RPY 范围、运动学 `c11/c12/c21/c22/k3`、`feedback.enabled/socket_path/rate_hz`。**不得为了让测试通过而修改标定/限位/电流/速度。**
+`runtime/motor/neck/neck_config.py`（motor 唯一硬件配置）：`network_interface`、`slave_id`、三电机 `passage/id/min/max/center/max_velocity/speed_param/current_param`、RPY 范围、运动学 `c11/c12/c21/c22/k3`、`feedback.enabled/socket_path/rate_hz`。当前电机绝对角度 `[min,center,max]` 分别为 M1 `[-84,7,41]°`、M2 `[-250,-200,-125]°`、M3 `[57,147,238]°`；Pitch 为 `[-45,40]°`，Roll 为 `[-40,40]°`，Yaw 保持 `[-117,58]°`。**不得为了让测试通过而修改标定/限位/电流/速度。**
 
 ## 9. 硬件与安全铁律
 
@@ -264,8 +406,8 @@ python -m algorithm.train --config algorithm/configs/baseline.yaml --epochs 50
 
 1. 修改前检查工作树，不得覆盖他人未提交修改。
 2. 保持小步、局部、可测试；不做无关重构。
-3. 不修改冻结协议（§4）、Motor 标定、Dataset V1 artifact、`split_v1` 映射。
-4. Dataset 的 expensive 阶段（download/ASR/mediapipe/neck/fragment/split）未经授权不重跑，不使用 `--force`。
+3. 不修改冻结协议（§4）和 Motor 标定；Dataset 新处理契约需在重新设计后明确记录。
+4. Dataset 爬取代码当前保持不变；未经授权不重新下载原始视频。
 5. Runtime 主链路保持内存/WebSocket/Unix socket；`runtime/experiments/` 只做旁路记录。
 6. 新 Algorithm 不复用 runtime 的 inference 代码作为训练基础；Runtime 不 import `algorithm`。
 7. **文档只维护本文件**：任何行为、命令、配置变化同步到这里；不要再新增领域级 AGENTS/README。

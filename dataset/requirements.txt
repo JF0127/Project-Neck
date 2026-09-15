@@ -1,10 +1,12 @@
 -e .
 PyYAML>=6.0
 yt-dlp
+numpy>=1.24
 opencv-python>=4.8
 mediapipe>=0.10.14
 matplotlib>=3.7
-scipy>=1.10
-faster-whisper>=1.1
-scenedetect>=0.6.4
+funasr>=1.4.15
+qwen-asr>=0.0.6
 ultralytics>=8.3
+insightface==0.7.3
+onnxruntime-gpu[cuda,cudnn]>=1.21

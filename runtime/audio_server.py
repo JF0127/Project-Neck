@@ -9,13 +9,13 @@ from dataclasses import dataclass
 from typing import Any
 
 from .contracts import RobotSpeech
+from .logging_utils import log
 from .runtime import Runtime
 from .tts import BYTES_PER_FRAME, iter_pcm_frames
 
 SAMPLE_RATE = 16_000
 CHANNELS = 1
 PCM_FORMAT = "pcm_s16le"
-FRAME_DURATION_SEC = 0.020
 
 
 @dataclass
@@ -47,6 +47,8 @@ class AudioWebSocketServer:
         self, websocket: Any, speech: RobotSpeech
     ) -> None:
         stream_id = f"robot_{uuid.uuid4().hex}"
+        send_started = time.perf_counter()
+        self.runtime.robot_audio_send_started()
         await websocket.send(
             json.dumps(
                 {
@@ -62,14 +64,11 @@ class AudioWebSocketServer:
         )
 
         frame_count = 0
-        next_send = time.monotonic()
         for frame in iter_pcm_frames(speech.pcm_s16le):
             if len(frame) != BYTES_PER_FRAME:
                 raise RuntimeError("outgoing robot PCM frame is not 640 bytes")
             await websocket.send(frame)
             frame_count += 1
-            next_send += FRAME_DURATION_SEC
-            await asyncio.sleep(max(0.0, next_send - time.monotonic()))
 
         await websocket.send(
             json.dumps(
@@ -77,9 +76,12 @@ class AudioWebSocketServer:
                 separators=(",", ":"),
             )
         )
-        print(
+        network_send_sec = time.perf_counter() - send_started
+        log(
             f"[runtime][audio] robot stream complete: frames={frame_count}, "
-            f"bytes={frame_count * BYTES_PER_FRAME}"
+            f"bytes={frame_count * BYTES_PER_FRAME}, "
+            f"audio_duration={speech.duration_sec:.3f}s, "
+            f"network_send_time={network_send_sec:.3f}s"
         )
 
     async def handle_connection(self, websocket: Any) -> None:
@@ -88,7 +90,7 @@ class AudioWebSocketServer:
         peer = getattr(websocket, "remote_address", None)
         stream: TransportStream | None = None
         session_opened = False
-        print(f"[runtime][audio] connection #{connection_number}: {peer}")
+        log(f"[runtime][audio] connection #{connection_number}: {peer}")
         try:
             self.runtime.connection_opened(
                 lambda speech: self._send_robot_audio(websocket, speech)
@@ -124,7 +126,7 @@ class AudioWebSocketServer:
                         raise ValueError("stream_id must be a non-empty string")
                     stream = TransportStream(stream_id)
                     self.runtime.audio_stream_started()
-                    print(f"[runtime][audio] transport stream_start: {stream_id}")
+                    log(f"[runtime][audio] transport stream_start: {stream_id}")
                 elif message_type == "stream_end":
                     if stream is None:
                         raise ValueError("stream_end received without stream_start")
@@ -133,7 +135,7 @@ class AudioWebSocketServer:
                     completed = stream
                     stream = None
                     self.runtime.audio_stream_ended()
-                    print(
+                    log(
                         f"[runtime][audio] transport stream_end: "
                         f"{completed.stream_id}, frames={completed.frame_count}"
                     )
@@ -147,7 +149,7 @@ class AudioWebSocketServer:
         finally:
             if session_opened:
                 await self.runtime.connection_closed()
-            print(f"[runtime][audio] connection #{connection_number} closed")
+            log(f"[runtime][audio] connection #{connection_number} closed")
 
     async def serve_forever(self) -> None:
         try:
@@ -161,5 +163,5 @@ class AudioWebSocketServer:
                 ) from exc
 
         async with serve(self.handle_connection, self.host, self.port, max_size=64 * 1024):
-            print(f"[runtime][audio] listening on ws://{self.host}:{self.port}")
+            log(f"[runtime][audio] listening on ws://{self.host}:{self.port}")
             await asyncio.Future()

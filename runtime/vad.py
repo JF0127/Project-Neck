@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
+import time
 from typing import Any, Callable
 
 import numpy as np
@@ -59,6 +60,9 @@ class SileroVAD:
         self._segment = bytearray()
         self._candidate_samples = 0
         self._silence_samples = 0
+        self._silence_started_perf: float | None = None
+        self.last_speech_end_perf: float | None = None
+        self.last_end_delay_sec: float | None = None
         self.in_speech = False
         self.reset()
 
@@ -68,6 +72,9 @@ class SileroVAD:
         self._segment.clear()
         self._candidate_samples = 0
         self._silence_samples = 0
+        self._silence_started_perf = None
+        self.last_speech_end_perf = None
+        self.last_end_delay_sec = None
         self.in_speech = False
         if self.model is not None:
             reset_states = getattr(self.model, "reset_states", None)
@@ -118,15 +125,26 @@ class SileroVAD:
         self._segment.extend(window)
         if is_speech:
             self._silence_samples = 0
+            self._silence_started_perf = None
             return None
 
+        if self._silence_samples == 0:
+            self._silence_started_perf = time.perf_counter()
         self._silence_samples += SILERO_WINDOW_SAMPLES
         if self._silence_samples < self.min_silence_samples:
             return None
 
         completed = bytes(self._segment)
+        detected_perf = time.perf_counter()
+        self.last_speech_end_perf = self._silence_started_perf
+        self.last_end_delay_sec = (
+            detected_perf - self._silence_started_perf
+            if self._silence_started_perf is not None
+            else None
+        )
         self._segment.clear()
         self._silence_samples = 0
+        self._silence_started_perf = None
         self.in_speech = False
         return self._user_audio(completed)
 

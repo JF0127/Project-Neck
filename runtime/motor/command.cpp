@@ -141,6 +141,7 @@ unsigned help(const std::vector<std::string> &) {
         << "\tMotorStop <SlaveId> <PassAge> <MotorId>\n"
         << "\tMotorSpeedSet <SlaveId> <PassAge> <MotorId> <Speed>(0) <Current>(500) <AckStatus>(2)\n"
         << "\tMotorPositionSet <SlaveId> <PassAge> <MotorId> <Position>(0) <Speed>(50) <Current>(500) <AckStatus>(2)\n"
+        << "\tMotorAngleGet <SlaveId> <PassAge> <MotorId>\n"
         << "\tNeckPoseSet <SlaveId> <Pitch> <Roll> <Yaw>  (degree)\n"
         << "\tNeckSequence <TrajectoryName>\n"
         << "\tNeckSequenceStop\n";
@@ -322,6 +323,39 @@ unsigned motorPositionSet(const std::vector<std::string> & input) {
     set_motor_position(msg.get(), passage, motor_id, pos, spd, cur, ack_status);
     Queue_Msg_ptr queue_msg = createQueueMsg(msg, passage);
     sendToQueue(slaveId, queue_msg);
+    return 0;
+}
+
+unsigned motorAngleGet(const std::vector<std::string>& input) {
+    if (input.size() != 4) {
+        std::cout << "Command format error\n"
+                  << "\tShould be \"MotorAngleGet <SlaveId> <PassAge> <MotorId>\"\n";
+        return 1;
+    }
+
+    int slave_id;
+    int passage;
+    int motor_id;
+    if (!parseInt(input[1], slave_id) ||
+        !parseInt(input[2], passage) ||
+        !parseInt(input[3], motor_id)) {
+        std::cout << "Parameter error: all parameters must be integers\n";
+        return 1;
+    }
+
+    std::string error;
+    if (!validNeckSlave(slave_id, error) || passage < 1 || passage > 6 ||
+        motor_id < 1 || motor_id > 0x7FE) {
+        std::cout << "MotorAngleGet parameter error: "
+                  << (error.empty() ? "PassAge must be in [1, 6] and MotorId in [1, 0x7FE]"
+                                    : error)
+                  << "\n";
+        return 1;
+    }
+
+    EtherCAT_Msg_ptr message = std::make_shared<EtherCAT_Msg>();
+    get_motor_parameter(message.get(), passage, motor_id, param_get_pos);
+    sendToQueue(slave_id, createQueueMsg(message, passage));
     return 0;
 }
 

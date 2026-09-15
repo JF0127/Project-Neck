@@ -25,6 +25,7 @@ unsigned motorZeroSet(const std::vector<std::string> & input);
 unsigned motorStop(const std::vector<std::string> & input);
 unsigned motorSpeedSet(const std::vector<std::string> & input);
 unsigned motorPositionSet(const std::vector<std::string> & input);
+unsigned motorAngleGet(const std::vector<std::string> & input);
 unsigned neckPoseSet(const std::vector<std::string> & input);
 unsigned neckSequence(const std::vector<std::string> & input);
 unsigned neckSequenceStop(const std::vector<std::string> & input);

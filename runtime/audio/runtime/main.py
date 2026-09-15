@@ -9,7 +9,7 @@ from pathlib import Path
 
 from . import config
 from .audio_capture import MicrophoneCapture
-from .websocket_client import run_duplex_test, stream_microphone
+from .websocket_client import run_conversation, run_duplex_test, stream_microphone
 
 
 def validate_config() -> None:
@@ -94,6 +94,18 @@ def websocket_test(
         )
 
 
+def conversation(websocket_url: str) -> None:
+    validate_config()
+    print("Natural half-duplex conversation. Press Ctrl+C to stop.")
+    asyncio.run(run_conversation(websocket_url))
+
+
+def asr_stream(websocket_url: str) -> None:
+    validate_config()
+    print("Continuous microphone/robot audio loop. Press Ctrl+C to stop.")
+    asyncio.run(run_conversation(websocket_url))
+
+
 def duplex_test(turns: int, duration: float, websocket_url: str, robot_timeout: float) -> None:
     validate_config()
     results = asyncio.run(run_duplex_test(turns, duration, websocket_url, robot_timeout))
@@ -133,8 +145,20 @@ def parse_args() -> argparse.Namespace:
     stream_parser.add_argument(
         "--robot-timeout", type=float, default=30.0, help="seconds to wait for robot stream"
     )
+    conversation_parser = subparsers.add_parser(
+        "conversation", help="run continuous natural half-duplex conversation"
+    )
+    conversation_parser.add_argument(
+        "--url", default=config.WEBSOCKET_URL, help="WebSocket server URL"
+    )
+    asr_parser = subparsers.add_parser(
+        "asr-stream", help="run continuous microphone and robot playback turns"
+    )
+    asr_parser.add_argument(
+        "--url", default=config.WEBSOCKET_URL, help="WebSocket server URL"
+    )
     duplex_parser = subparsers.add_parser(
-        "duplex-test", help="run multiple user-to-robot turns on one WebSocket"
+        "duplex-test", help="run multiple fixed-duration diagnostic turns"
     )
     duplex_parser.add_argument("--turns", type=int, default=2, help="number of turns (minimum 2)")
     duplex_parser.add_argument(
@@ -156,6 +180,10 @@ def main() -> None:
             capture_test(args.duration, args.output)
         elif args.command == "stream-test":
             websocket_test(args.duration, args.url, args.wait_for_robot, args.robot_timeout)
+        elif args.command == "conversation":
+            conversation(args.url)
+        elif args.command == "asr-stream":
+            asr_stream(args.url)
         elif args.command == "duplex-test":
             duplex_test(args.turns, args.duration, args.url, args.robot_timeout)
     except KeyboardInterrupt:

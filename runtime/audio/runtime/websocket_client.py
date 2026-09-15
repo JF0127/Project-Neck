@@ -5,7 +5,8 @@ import queue
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any, List, Optional
+from datetime import datetime
+from typing import Any, Callable, List, Optional
 
 from websockets import connect
 from websockets.exceptions import ConnectionClosed
@@ -14,6 +15,11 @@ from . import config
 from .audio_capture import MicrophoneCapture
 from .audio_playback import AudioPlayback, PlaybackStats
 from .protocol import ProtocolError, parse_control_message, stream_end_message, stream_start_message
+
+
+def _log(message: str) -> None:
+    timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+    print(f"[{timestamp}] {message}", flush=True)
 
 
 @dataclass
@@ -55,7 +61,11 @@ class StreamResult:
     playback: Optional[PlaybackStats]
 
 
-async def _send_user_stream(websocket: Any, duration: Optional[float]) -> UserStreamResult:
+async def _send_user_stream(
+    websocket: Any,
+    duration: Optional[float],
+    stop_event: Optional[asyncio.Event] = None,
+) -> UserStreamResult:
     stream_id = f"user_{uuid.uuid4().hex}"
     capture = MicrophoneCapture()
     frames_sent = 0
@@ -71,7 +81,10 @@ async def _send_user_stream(websocket: Any, duration: Optional[float]) -> UserSt
         started_at = time.monotonic()
         deadline = started_at + duration if duration is not None else None
 
-        while deadline is None or time.monotonic() < deadline:
+        while (
+            (deadline is None or time.monotonic() < deadline)
+            and (stop_event is None or not stop_event.is_set())
+        ):
             max_queue_depth = max(max_queue_depth, capture.frames.qsize())
             timeout = 0.1
             if deadline is not None:
@@ -80,6 +93,8 @@ async def _send_user_stream(websocket: Any, duration: Optional[float]) -> UserSt
                 frame = await asyncio.to_thread(capture.read_frame, timeout)
             except queue.Empty:
                 continue
+            if stop_event is not None and stop_event.is_set():
+                break
             if len(frame) != config.BYTES_PER_FRAME:
                 raise RuntimeError(f"invalid PCM frame size: {len(frame)} bytes")
             await websocket.send(frame)
@@ -87,16 +102,20 @@ async def _send_user_stream(websocket: Any, duration: Optional[float]) -> UserSt
             total_bytes += len(frame)
 
         capture.stop()
-        while True:
-            try:
-                frame = capture.frames.get_nowait()
-            except queue.Empty:
-                break
-            if len(frame) != config.BYTES_PER_FRAME:
-                raise RuntimeError(f"invalid PCM frame size: {len(frame)} bytes")
-            await websocket.send(frame)
-            frames_sent += 1
-            total_bytes += len(frame)
+        # Fixed-duration diagnostics preserve all frames captured before their
+        # deadline. Natural conversation deliberately discards queued input as
+        # soon as the robot starts replying.
+        if stop_event is None:
+            while True:
+                try:
+                    frame = capture.frames.get_nowait()
+                except queue.Empty:
+                    break
+                if len(frame) != config.BYTES_PER_FRAME:
+                    raise RuntimeError(f"invalid PCM frame size: {len(frame)} bytes")
+                await websocket.send(frame)
+                frames_sent += 1
+                total_bytes += len(frame)
     finally:
         capture.stop()
         elapsed = time.monotonic() - started_at
@@ -117,21 +136,31 @@ async def _send_user_stream(websocket: Any, duration: Optional[float]) -> UserSt
     )
 
 
-async def _receive_robot_stream(websocket: Any) -> Optional[RobotStreamResult]:
+async def _receive_robot_stream(
+    websocket: Any,
+    on_stream_start: Optional[Callable[[], None]] = None,
+) -> Optional[RobotStreamResult]:
     playback: Optional[AudioPlayback] = None
     robot_stream_id: Optional[str] = None
+    robot_frames: list[bytes] = []
     try:
         async for message in websocket:
             if isinstance(message, bytes):
-                if playback is None:
+                if robot_stream_id is None:
                     raise ProtocolError("binary PCM received outside a robot stream")
-                playback.enqueue(message)
+                if len(message) != config.BYTES_PER_FRAME:
+                    raise ProtocolError(
+                        f"invalid robot PCM frame: {len(message)} bytes"
+                    )
+                robot_frames.append(message)
                 continue
 
             control = parse_control_message(message)
             if control["type"] == "stream_start":
-                if playback is not None:
-                    raise ProtocolError("robot stream_start received while a stream is active")
+                if robot_stream_id is not None:
+                    raise ProtocolError(
+                        "robot stream_start received while a stream is active"
+                    )
                 if control.get("source") != "robot":
                     raise ProtocolError("incoming stream source must be robot")
                 if control.get("sample_rate") != config.SAMPLE_RATE:
@@ -141,22 +170,40 @@ async def _receive_robot_stream(websocket: Any) -> Optional[RobotStreamResult]:
                 if control.get("format") != config.PCM_FORMAT:
                     raise ProtocolError("robot format must be pcm_s16le")
                 robot_stream_id = control["stream_id"]
-                playback = AudioPlayback()
-                await asyncio.to_thread(playback.open)
-                print(f"Robot stream started: {robot_stream_id}")
-            else:
-                if playback is None or control["stream_id"] != robot_stream_id:
-                    raise ProtocolError("robot stream_end does not match the active stream")
-                stats = await asyncio.to_thread(playback.finish)
-                result = RobotStreamResult(
-                    stream_id=robot_stream_id,
-                    frames_received=stats.received_frames,
-                    total_bytes=stats.received_frames * config.BYTES_PER_FRAME,
-                    playback=stats,
+                robot_frames = []
+                if on_stream_start is not None:
+                    on_stream_start()
+                _log(f"robot_stream_start: {robot_stream_id}")
+                continue
+
+            if robot_stream_id is None or control["stream_id"] != robot_stream_id:
+                raise ProtocolError(
+                    "robot stream_end does not match the active stream"
                 )
-                playback = None
-                print(f"Robot stream ended: {robot_stream_id}")
-                return result
+
+            _log(
+                f"robot_stream_end: {robot_stream_id}, "
+                f"frames={len(robot_frames)}"
+            )
+            playback = AudioPlayback(
+                queue_size=max(1, len(robot_frames)),
+                prebuffer_frames=len(robot_frames) + 1,
+            )
+            await asyncio.to_thread(playback.open)
+            for frame in robot_frames:
+                playback.enqueue(frame)
+
+            _log(f"playback_start: {robot_stream_id}")
+            stats = await asyncio.to_thread(playback.finish)
+            _log(f"playback_end: {robot_stream_id}")
+            result = RobotStreamResult(
+                stream_id=robot_stream_id,
+                frames_received=stats.received_frames,
+                total_bytes=stats.received_frames * config.BYTES_PER_FRAME,
+                playback=stats,
+            )
+            playback = None
+            return result
     finally:
         if playback is not None:
             await asyncio.to_thread(playback.close)
@@ -199,6 +246,65 @@ async def stream_microphone(
         max_queue_depth=user.max_queue_depth,
         playback=playback_result.playback if playback_result is not None else None,
     )
+
+
+async def run_conversation(
+    websocket_url: str = config.WEBSOCKET_URL,
+) -> None:
+    """Run natural, repeated half-duplex turns on one WebSocket connection."""
+    websocket: Any | None = None
+    try:
+        async with connect(websocket_url) as connection:
+            websocket = connection
+            _log(f"connection_established: {websocket_url}")
+            turn_number = 0
+            while True:
+                turn_number += 1
+                stop_capture = asyncio.Event()
+                user_task = asyncio.create_task(
+                    _send_user_stream(
+                        websocket,
+                        duration=None,
+                        stop_event=stop_capture,
+                    )
+                )
+                robot_task = asyncio.create_task(
+                    _receive_robot_stream(
+                        websocket,
+                        on_stream_start=stop_capture.set,
+                    )
+                )
+                _log(f"turn {turn_number}: listening")
+                try:
+                    user, robot = await asyncio.gather(user_task, robot_task)
+                finally:
+                    stop_capture.set()
+                    for task in (user_task, robot_task):
+                        if not task.done():
+                            task.cancel()
+                    await asyncio.gather(
+                        user_task,
+                        robot_task,
+                        return_exceptions=True,
+                    )
+
+                if robot is None:
+                    raise RuntimeError("connection closed before robot stream")
+                _log(
+                    f"turn {turn_number}: complete; "
+                    f"user_frames={user.frames_sent}, "
+                    f"robot_frames={robot.frames_received}, "
+                    f"playback_underruns={robot.playback.underruns}"
+                )
+                _log("microphone_resume")
+    finally:
+        if websocket is not None:
+            code = getattr(websocket, "close_code", None)
+            reason = getattr(websocket, "close_reason", None)
+            protocol = getattr(websocket, "protocol", None)
+            if reason is None and protocol is not None:
+                reason = getattr(protocol, "close_reason", None)
+            _log(f"connection_closed: code={code}, reason={reason or 'none'}")
 
 
 async def run_duplex_test(

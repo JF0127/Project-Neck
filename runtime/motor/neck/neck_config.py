@@ -10,9 +10,9 @@ ack_status = 2
 # ==============================
 motor1.passage = 1 # pyright: ignore[reportUndefinedVariable]
 motor1.id = 1
-motor1.min_position_deg = -85
-motor1.max_position_deg = 64
-motor1.center_position_deg = 10
+motor1.min_position_deg = -84
+motor1.max_position_deg = 41
+motor1.center_position_deg = 7
 motor1.max_velocity_deg_s = 25
 motor1.speed_param = 50
 motor1.current_param = 500
@@ -22,9 +22,9 @@ motor1.current_param = 500
 # ==============================
 motor2.passage = 2
 motor2.id = 2
-motor2.min_position_deg = -34
-motor2.max_position_deg = 113
-motor2.center_position_deg = 26
+motor2.min_position_deg = -250
+motor2.max_position_deg = -125
+motor2.center_position_deg = -200
 motor2.max_velocity_deg_s = 25
 motor2.speed_param = 50
 motor2.current_param = 500
@@ -34,9 +34,9 @@ motor2.current_param = 500
 # ==============================
 motor3.passage = 3
 motor3.id = 3
-motor3.min_position_deg = 60
-motor3.max_position_deg = 235
-motor3.center_position_deg = 145
+motor3.min_position_deg = 57
+motor3.max_position_deg = 238
+motor3.center_position_deg = 147
 motor3.max_velocity_deg_s = 30
 motor3.speed_param = 50
 motor3.current_param = 500
@@ -44,10 +44,10 @@ motor3.current_param = 500
 # ==============================
 # Neck RPY Range
 # ==============================
-pitch_min_deg = -40
-pitch_max_deg = 25
-roll_min_deg = -35
-roll_max_deg = 35
+pitch_min_deg = -45
+pitch_max_deg = 40
+roll_min_deg = -40
+roll_max_deg = 40
 yaw_min_deg = -117
 yaw_max_deg = 58
 

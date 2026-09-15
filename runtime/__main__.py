@@ -61,7 +61,6 @@ def build_runtime(config: dict[str, Any], config_path: Path):
     from .dialogue import DeepSeekDialogue
     from .feedback import MotorFeedbackMonitor
     from .runtime import Runtime
-    from .tts import EdgeTTS
     from .vad import SileroVAD
 
     audio = _section(config, "audio")
@@ -79,8 +78,8 @@ def build_runtime(config: dict[str, Any], config_path: Path):
         raise ValueError("Stage 3 requires asr.backend=whisper")
     if dialogue_config.get("backend") != "deepseek":
         raise ValueError("Stage 3 requires dialogue.backend=deepseek")
-    if tts_config.get("backend") != "edge":
-        raise ValueError("Stage 3 requires tts.backend=edge")
+    if tts_config.get("backend") not in {"doubao", "edge"}:
+        raise ValueError("tts.backend must be doubao or edge")
 
     vad = SileroVAD(
         model_path=_model_path(
@@ -104,7 +103,14 @@ def build_runtime(config: dict[str, Any], config_path: Path):
         timeout_sec=float(dialogue_config.get("timeout_sec", 30.0)),
         temperature=float(dialogue_config.get("temperature", 0.7)),
     )
-    tts = EdgeTTS(voice=str(tts_config.get("voice", "en-US-GuyNeural")))
+    if tts_config.get("backend") == "doubao":
+        from .doubao_tts import DoubaoTTS
+
+        tts = DoubaoTTS()
+    else:
+        from .tts import EdgeTTS
+
+        tts = EdgeTTS(voice=str(tts_config.get("voice", "en-US-GuyNeural")))
     robot_state = RobotState()
 
     turn_generator = None

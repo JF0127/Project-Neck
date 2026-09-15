@@ -40,6 +40,7 @@ void comImpl()
         {"MotorStop", motorStop},
         {"MotorSpeedSet", motorSpeedSet},
         {"MotorPositionSet", motorPositionSet},
+        {"MotorAngleGet", motorAngleGet},
         {"NeckPoseSet", neckPoseSet},
         {"NeckSequence", neckSequence},
         {"NeckSequenceStop", neckSequenceStop}};
