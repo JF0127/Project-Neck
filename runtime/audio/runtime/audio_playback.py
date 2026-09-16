@@ -1,6 +1,8 @@
 """Buffered pcm_s16le speaker playback."""
 
 import queue
+import shutil
+import subprocess
 import time
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -23,7 +25,7 @@ class PlaybackStats:
 
 
 class AudioPlayback:
-    """Connect an async network receiver to PortAudio through a bounded Queue."""
+    """Buffer robot PCM and play it through the selected local backend."""
 
     def __init__(
         self,
@@ -40,11 +42,40 @@ class AudioPlayback:
         self.last_callback_status = ""
         self.first_playback_perf: Optional[float] = None
         self._stream: Optional[Any] = None
+        self._process: Optional[subprocess.Popen[bytes]] = None
         self._started = False
         self._receiving = True
         self._silence = bytes(config.BYTES_PER_FRAME)
 
+    @staticmethod
+    def _set_pulse_sink_port() -> None:
+        if shutil.which("pactl") is None or shutil.which("paplay") is None:
+            raise RuntimeError("Linux Pulse audio requires pactl and paplay")
+        result = subprocess.run(
+            [
+                "pactl",
+                "set-sink-port",
+                config.PULSE_SINK,
+                config.PULSE_SINK_PORT,
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                "could not select Pulse speaker port: "
+                f"{result.stderr.strip()}"
+            )
+
     def open(self) -> None:
+        if config.LOCAL_AUDIO_BACKEND == "pulse":
+            self._set_pulse_sink_port()
+            return
+        if config.LOCAL_AUDIO_BACKEND != "sounddevice":
+            raise RuntimeError(
+                f"unsupported local audio backend: {config.LOCAL_AUDIO_BACKEND}"
+            )
         if self._stream is not None:
             return
         try:
@@ -96,14 +127,55 @@ class AudioPlayback:
             self._start_stream()
 
     def _start_stream(self) -> None:
+        if config.LOCAL_AUDIO_BACKEND == "pulse":
+            return
         if self._stream is None:
             self.open()
         if not self._started:
             self._stream.start()
             self._started = True
 
+    def _finish_pulse(self) -> PlaybackStats:
+        self._receiving = False
+        pcm_frames: list[bytes] = []
+        while True:
+            try:
+                pcm_frames.append(self.frames.get_nowait())
+            except queue.Empty:
+                break
+        pcm = b"".join(pcm_frames)
+        if not pcm:
+            return self.stats()
+
+        self.first_playback_perf = time.perf_counter()
+        self._process = subprocess.Popen(
+            [
+                "paplay",
+                f"--device={config.PULSE_SINK}",
+                "--raw",
+                "--format=s16le",
+                f"--rate={config.SAMPLE_RATE}",
+                f"--channels={config.CHANNELS}",
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+        process = self._process
+        _, stderr = process.communicate(input=pcm)
+        self._process = None
+        if process.returncode != 0:
+            raise RuntimeError(
+                "paplay failed: "
+                + stderr.decode("utf-8", errors="replace").strip()
+            )
+        self.played_frames = self.received_frames
+        return self.stats()
+
     def finish(self) -> PlaybackStats:
         """Play all queued frames, then stop and close the output device."""
+        if config.LOCAL_AUDIO_BACKEND == "pulse":
+            return self._finish_pulse()
         self._receiving = False
         if self.received_frames and not self._started:
             self._start_stream()
@@ -133,6 +205,15 @@ class AudioPlayback:
 
     def close(self) -> None:
         self._receiving = False
+        process, self._process = self._process, None
+        if process is not None and process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=1.0)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=1.0)
+
         stream, self._stream = self._stream, None
         if stream is not None:
             if self._started:

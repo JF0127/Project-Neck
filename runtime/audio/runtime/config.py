@@ -1,6 +1,7 @@
 """Fixed configuration for Audio Module V1."""
 
 import os
+import sys
 
 # The wire audio format is frozen by the system architecture.
 SAMPLE_RATE = 16_000
@@ -19,3 +20,26 @@ PLAYBACK_PREBUFFER_FRAMES = 5  # 100 ms
 
 # Used by the WebSocket phase. The audio format above is intentionally not configurable.
 WEBSOCKET_URL = os.getenv("AUDIO_MODULE_WS_URL", "ws://10.255.0.35:8765")
+
+# Linux uses the confirmed PulseAudio/PipeWire logical devices. macOS keeps
+# using PortAudio through sounddevice.
+LOCAL_AUDIO_BACKEND = os.getenv(
+    "AUDIO_MODULE_LOCAL_BACKEND",
+    "pulse" if sys.platform.startswith("linux") else "sounddevice",
+)
+PULSE_SOURCE = os.getenv(
+    "AUDIO_MODULE_PULSE_SOURCE",
+    "alsa_input.pci-0000_00_1f.3.analog-stereo",
+)
+PULSE_SOURCE_PORT = os.getenv(
+    "AUDIO_MODULE_PULSE_SOURCE_PORT",
+    "analog-input-rear-mic",
+)
+PULSE_SINK = os.getenv(
+    "AUDIO_MODULE_PULSE_SINK",
+    "alsa_output.pci-0000_00_1f.3.analog-stereo",
+)
+PULSE_SINK_PORT = os.getenv(
+    "AUDIO_MODULE_PULSE_SINK_PORT",
+    "analog-output-lineout",
+)

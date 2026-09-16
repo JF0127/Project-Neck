@@ -200,6 +200,14 @@ NeckPoseSet 0 0 0 0
 
 `qwen_transcribe.py` 递归处理指定目录内的 16 kHz mono PCM s16 WAV，使用本地 `models/qwen` Qwen3-ASR-1.7B 和 `models/qwen3-forced-aligner`，固定 `language=Chinese` 并启用 forced alignment。每个 WAV 在原目录旁原子写入 `<stem>.qwen_asr_v1.json`，保留完整 `text` 与字级 `timestamps[{text,start_time,end_time}]`，并固定标记 `review.status=pending`；默认拒绝覆盖任何已有 Qwen JSON，只有显式 `--force` 才替换。该结果只供人工组装和审核，不是人工标注真源。
 
+### 5.7 主播人脸选择诊断
+
+`speaker_identity_debug.py` 使用固定 seed 从原始视频目录随机选择 10 个视频，只读取每个视频 `0.0/0.5/1.0/1.5/2.0s` 五帧，并使用本地 InsightFace `buffalo_l` 的检测、识别和性别模型验证主人脸自动选择。每帧优先在脸中心位于画面上方 60% 的候选中选择 bbox 面积最大者；没有上部候选时退化为全画面最大脸。独立输出目录包含每视频一张五帧 contact sheet、逐帧 `results.jsonl` 和带 `complete=true` 的 `manifest.json`；不保存 embedding、不聚类、不生成 speaker ID，也不修改、移动或切分输入视频。输出以 staging directory 原子发布，已有输出默认拒绝覆盖，仅 `--force` 时替换。
+
+### 5.8 主播视频 embedding 与相似度诊断
+
+`speaker_similarity.py` 对原始视频目录内全部顶层视频复用相同的五帧采样与主人脸选择规则，汇总每个视频成功帧的 InsightFace normed embedding：先求算术均值，再做一次 L2 normalize，得到唯一 `video_embedding`；五帧全部失败的视频显式标记为 unresolved。脚本只计算有效视频间的 embedding 点积（cosine similarity），输出按文件名排序的 `video_embeddings.npz`、100×100 `similarity_matrix.npy`（unresolved 行列为 NaN）、每视频前五近邻 `top5_neighbors.jsonl` 和 `manifest.json`，并报告非对角唯一视频对及逐视频 Top-1 的 min/mean/median/max。gender 仅作为 metadata，不参与计算；该诊断不使用阈值、不聚类、不生成 speaker ID，也不修改原始视频。输出同样原子发布且默认拒绝覆盖。
+
 Algorithm 暂无可用训练入口，不得从训练代码隐式触发任何 Dataset 处理。
 
 ## 6. 目录结构
@@ -292,6 +300,14 @@ export VOLCENGINE_TTS_SPEAKER="zh_female_vv_uranus_bigtts"  # 可选，未设置
 python tools/qwen_streaming_server.py
 # 仅诊断 DeepSeek Responses event 时追加 --debug-deepseek-events
 
+# Audio 客户端（Ubuntu 本机 PulseAudio/PipeWire；服务端需先运行）
+# 依赖 pactl/parec/paplay（Ubuntu 包通常为 pulseaudio-utils）
+# 固定 source/port: alsa_input.pci-0000_00_1f.3.analog-stereo / analog-input-rear-mic
+# 固定 sink/port:   alsa_output.pci-0000_00_1f.3.analog-stereo / analog-output-lineout
+cd runtime/audio
+source .venv/bin/activate
+python -m runtime.main conversation --url ws://127.0.0.1:8765
+
 # Audio 客户端（Mac；服务端需先运行）
 cd runtime/audio
 brew install portaudio
@@ -307,7 +323,7 @@ python3 -m runtime.main duplex-test --turns 2 --duration 5
 python3 -m runtime.main conversation
 ```
 
-默认连接 `ws://10.255.0.35:8765`（可用 `AUDIO_MODULE_WS_URL` 或 `--url` 覆盖）。`conversation` 与当前 `asr-stream` 都在一个 WebSocket 上持续多轮半双工运行，不逐轮重连：监听期持续发送麦克风 PCM，收到机器人 `stream_start` 后停止本轮采集；Ubuntu 在完整 TTS PCM 就绪后无实时 pacing 地快速发送 `stream_start`、全部音频帧和 `stream_end`，Mac 收到完整 `stream_end` 后才开始播放，播放完成后恢复麦克风。日志分别记录 `speech_duration`（speech_start→speech_end）、`asr_finalize_latency`（speech_end→ASR FINAL）、`audio_duration`、`network_send_time`、`playback_start/end`、`microphone_resume` 与连接关闭原因。跨机器时钟不可直接比较。
+默认连接 `ws://10.255.0.35:8765`（可用 `AUDIO_MODULE_WS_URL` 或 `--url` 覆盖）。Linux Audio client 默认使用 PulseAudio/PipeWire 的 `parec`/`paplay`，启动采集/播放前用 `pactl` 明确选择 Rear Microphone 与 Rear Line Out；仍固定输出 16 kHz、mono、s16le、20 ms/640 bytes，不直接打开 ALSA `hw:*`。macOS 继续使用 sounddevice/PortAudio。`conversation` 与当前 `asr-stream` 都在一个 WebSocket 上持续多轮半双工运行，不逐轮重连：监听期持续发送麦克风 PCM，收到机器人 `stream_start` 后停止本轮采集；Ubuntu 在完整 TTS PCM 就绪后无实时 pacing 地快速发送 `stream_start`、全部音频帧和 `stream_end`，Mac 收到完整 `stream_end` 后才开始播放，播放完成后恢复麦克风。日志分别记录 `speech_duration`（speech_start→speech_end）、`asr_finalize_latency`（speech_end→ASR FINAL）、`audio_duration`、`network_send_time`、`playback_start/end`、`microphone_resume` 与连接关闭原因。跨机器时钟不可直接比较。
 
 ### 7.3 Dataset
 
@@ -320,6 +336,12 @@ python -m src.cli clean \
   --input datasets/zhubo_shuo_lianbo/videos \
   --output datasets/zhubo_shuo_lianbo/clean_v2
 # 重建现有输出需显式添加 --force；快速软件检查可用 --limit N
+
+# 固定 seed 随机抽取 10 个原始视频，检查前 2 秒五帧的主人脸选择；不聚类、不改原片
+python -m src.processing.speaker_identity_debug
+
+# 全部原始视频的五帧 video embedding、两两 cosine similarity 和 Top-5；不聚类
+python -m src.processing.speaker_similarity
 
 # 每个 MP4 建立同名目录，并提取 16 kHz mono PCM s16 WAV
 python -m src.processing.prepare_video_audio \
@@ -382,13 +404,13 @@ python -m algorithm.train --config algorithm/configs/baseline.yaml --epochs 50
 |---|---|
 | `vad` | `backend: silero`, `model_path`, `threshold`, `min_speech_ms`, `min_silence_ms` |
 | `asr` | `backend: whisper`, `model_path`（large-v3 CT2）, `device: cuda/cpu`, `language: zh` |
-| `dialogue` | `backend: deepseek`, `model`（当前 `deepseek-flash` / DeepSeek-V4.1-Flash，Responses API streaming，`max_output_tokens=4096`、`reasoning.effort=none`；纯当前日期时间强制使用 `zoneinfo.ZoneInfo("Asia/Shanghai")` 的本地 `get_current_datetime`（UTC+08:00，禁止搜索或由模型自行推算/转换），天气/新闻等实时互联网信息使用本地 `web_search`（含“今天/目前/当前/最近”时自动加入上海绝对日期，每轮最多 3 次），普通静态知识自动跳过工具；默认自然口语简洁回答，用户明确要求时才展开细节）, `base_url`, `timeout_sec`, `temperature` |
+| `dialogue` | `backend: deepseek`, `model`（当前 `deepseek-flash` / DeepSeek-V4.1-Flash，Responses API streaming，`max_output_tokens=4096`、`reasoning.effort=none`；纯当前日期时间强制使用 `zoneinfo.ZoneInfo("Asia/Shanghai")` 的本地 `get_current_datetime`（UTC+08:00，禁止搜索或由模型自行推算/转换），天气/新闻等实时互联网信息使用本地 `web_search`（含“今天/目前/当前/最近”时自动加入上海绝对日期，每轮最多 3 次），普通静态知识自动跳过工具；默认使用适合语音播放的自然口语，回复尽量控制在 30 个汉字以内（含标点），仅在无法完整回答时才允许略微超过）, `base_url`, `timeout_sec`, `temperature` |
 | `tts` | `backend: doubao`（默认，V3 HTTP Chunked、`seed-tts-2.0`、16 kHz mono PCM；speaker 来自 `VOLCENGINE_TTS_SPEAKER`，默认 `zh_female_vv_uranus_bigtts`）；可切回 `edge` 并使用 `voice` |
 | `motion` | `enabled`, `model_path`, `vocab_path`, `device`, `generated_dir`, `sync_offset_ms` |
 | `motor` | `feedback_enabled`, `feedback_socket`, `feedback_stale_sec`, `send_enabled`, `socket_path`, `measurement_socket`, `mock` |
 | `runtime` | `dialogue_fallback_text`, `cooldown_ms` |
 
-`runtime/motor/neck/neck_config.py`（motor 唯一硬件配置）：`network_interface`、`slave_id`、三电机 `passage/id/min/max/center/max_velocity/speed_param/current_param`、RPY 范围、运动学 `c11/c12/c21/c22/k3`、`feedback.enabled/socket_path/rate_hz`。当前电机绝对角度 `[min,center,max]` 分别为 M1 `[-84,7,41]°`、M2 `[-250,-200,-125]°`、M3 `[57,147,238]°`；Pitch 为 `[-45,40]°`，Roll 为 `[-40,40]°`，Yaw 保持 `[-117,58]°`。**不得为了让测试通过而修改标定/限位/电流/速度。**
+`runtime/motor/neck/neck_config.py`（motor 唯一硬件配置）：`network_interface`、`slave_id`、三电机 `passage/id/min/max/center/max_velocity/speed_param/current_param`、RPY 范围、运动学 `c11/c12/c21/c22/k3`、`feedback.enabled/socket_path/rate_hz`。当前电机绝对角度 `[min,center,max]` 分别为 M1 `[-84,7,41]°`、M2 `[-250,-210,-125]°`、M3 `[57,147,238]°`；Pitch 为 `[-45,40]°`，Roll 为 `[-40,40]°`，Yaw 保持 `[-117,58]°`。**不得为了让测试通过而修改标定/限位/电流/速度。**
 
 ## 9. 硬件与安全铁律
 

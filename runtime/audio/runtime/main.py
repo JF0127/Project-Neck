@@ -35,8 +35,8 @@ def capture_test(duration: float, output: Path) -> None:
     started_at = time.monotonic()
     try:
         capture.start()
-        started_at = time.monotonic()
         deadline = started_at + duration
+        first_frame_received = False
         with wave.open(str(output), "wb") as wav_file:
             wav_file.setnchannels(config.CHANNELS)
             wav_file.setsampwidth(config.SAMPLE_WIDTH_BYTES)
@@ -46,6 +46,13 @@ def capture_test(duration: float, output: Path) -> None:
                     frame = capture.read_frame(timeout=0.5)
                 except queue.Empty:
                     continue
+                if not first_frame_received:
+                    # PulseAudio may need time to resume a suspended source.
+                    # Measure the requested audio duration from the first frame,
+                    # not from process startup.
+                    started_at = time.monotonic()
+                    deadline = started_at + duration
+                    first_frame_received = True
                 captured += 1
                 if len(frame) != config.BYTES_PER_FRAME:
                     invalid += 1
