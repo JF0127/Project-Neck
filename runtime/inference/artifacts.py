@@ -37,16 +37,22 @@ def _write_json_atomic(path: Path, value: object) -> None:
     os.replace(temporary, path)
 
 
-def _write_wav_atomic(path: Path, pcm_s16le: bytes) -> None:
+def write_wav_atomic(path: str | Path, pcm_s16le: bytes) -> Path:
+    """Atomically write 16 kHz mono PCM s16le bytes as a WAV file."""
     if not pcm_s16le or len(pcm_s16le) % 2:
         raise ValueError("robot pcm_s16le must contain an even non-zero byte count")
+    path = Path(path)
     temporary = path.with_name(path.name + ".tmp")
-    with wave.open(str(temporary), "wb") as handle:
-        handle.setnchannels(1)
-        handle.setsampwidth(2)
-        handle.setframerate(SAMPLE_RATE)
-        handle.writeframes(pcm_s16le)
-    os.replace(temporary, path)
+    try:
+        with wave.open(str(temporary), "wb") as handle:
+            handle.setnchannels(1)
+            handle.setsampwidth(2)
+            handle.setframerate(SAMPLE_RATE)
+            handle.writeframes(pcm_s16le)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return path
 
 
 def save_generation(
@@ -65,7 +71,7 @@ def save_generation(
     directory.mkdir(parents=True, exist_ok=True)
 
     audio_path = directory / AUDIO_FILENAME
-    _write_wav_atomic(audio_path, speech.pcm_s16le)
+    write_wav_atomic(audio_path, speech.pcm_s16le)
 
     trajectory_path: Path | None = None
     if document is not None:

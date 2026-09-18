@@ -6,15 +6,21 @@ import argparse
 import json
 import math
 import os
+import shutil
+import subprocess
 import tempfile
 import wave
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_MODEL = PROJECT_ROOT / "models" / "qwen"
 DEFAULT_ALIGNER = PROJECT_ROOT / "models" / "qwen3-forced-aligner"
 OUTPUT_SUFFIX = ".qwen_asr_v1.json"
+SAMPLE_RATE = 16_000
+_SUPPORTED_SUFFIXES = {".wav", ".mp4"}
 
 
 class QwenTranscriptionError(RuntimeError):
@@ -48,10 +54,54 @@ def _model_directory(path: Path, label: str) -> Path:
 
 
 def _audio_files(root: Path) -> list[Path]:
-    files = sorted(path for path in root.rglob("*") if path.is_file() and path.suffix.lower() == ".wav")
+    files = sorted(
+        path
+        for path in root.rglob("*")
+        if path.is_file() and path.suffix.lower() in _SUPPORTED_SUFFIXES
+    )
     if not files:
-        raise QwenTranscriptionError(f"no WAV files found in: {root}")
+        raise QwenTranscriptionError(f"no WAV or MP4 files found in: {root}")
     return files
+
+
+def _decode_mp4(path: Path, ffmpeg: str) -> tuple[np.ndarray, float]:
+    """Read an MP4 audio track through an ffmpeg pipe without writing a WAV."""
+    command = [
+        ffmpeg,
+        "-nostdin",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        str(path),
+        "-map",
+        "0:a:0",
+        "-vn",
+        "-ac",
+        "1",
+        "-ar",
+        str(SAMPLE_RATE),
+        "-acodec",
+        "pcm_s16le",
+        "-f",
+        "s16le",
+        "pipe:1",
+    ]
+    result = subprocess.run(command, capture_output=True, check=False)
+    if result.returncode != 0:
+        details = result.stderr.decode("utf-8", errors="replace").strip().splitlines()
+        raise QwenTranscriptionError(
+            f"ffmpeg audio decode failed for {path}: "
+            f"{details[-1] if details else 'unknown error'}"
+        )
+    if not result.stdout or len(result.stdout) % 2:
+        raise QwenTranscriptionError(
+            f"ffmpeg returned empty or invalid PCM audio for: {path}"
+        )
+    waveform = (
+        np.frombuffer(result.stdout, dtype="<i2").astype(np.float32) / 32768.0
+    )
+    return waveform, len(waveform) / SAMPLE_RATE
 
 
 def _timestamp_items(value: Any, audio: Path) -> list[dict[str, Any]]:
@@ -111,7 +161,7 @@ def transcribe_directory(
     max_new_tokens: int = 2048,
     force: bool = False,
 ) -> list[Path]:
-    """Transcribe every WAV below ``root`` into an adjacent Qwen JSON file."""
+    """Transcribe every WAV or MP4 below ``root`` into an adjacent Qwen JSON file."""
     root = root.expanduser().resolve()
     if not root.is_dir():
         raise QwenTranscriptionError(f"input directory not found: {root}")
@@ -124,13 +174,26 @@ def transcribe_directory(
     aligner_path = _model_directory(aligner_path, "forced aligner")
     audio_files = _audio_files(root)
     outputs = [audio.with_name(f"{audio.stem}{OUTPUT_SUFFIX}") for audio in audio_files]
+    if len(set(outputs)) != len(outputs):
+        raise QwenTranscriptionError(
+            "WAV and MP4 inputs with the same stem would overwrite one Qwen transcript"
+        )
     existing = [path for path in outputs if path.exists()]
     if existing and not force:
         raise QwenTranscriptionError(
             "Qwen transcript already exists; refusing to overwrite: "
             + ", ".join(str(path) for path in existing)
         )
-    durations = {audio: _validate_wav(audio) for audio in audio_files}
+    durations = {
+        audio: _validate_wav(audio)
+        for audio in audio_files
+        if audio.suffix.lower() == ".wav"
+    }
+    ffmpeg = shutil.which("ffmpeg") if any(
+        audio.suffix.lower() == ".mp4" for audio in audio_files
+    ) else None
+    if any(audio.suffix.lower() == ".mp4" for audio in audio_files) and ffmpeg is None:
+        raise QwenTranscriptionError("ffmpeg is required for MP4 audio decoding")
 
     try:
         import torch
@@ -156,8 +219,15 @@ def transcribe_directory(
 
     published: list[Path] = []
     for audio, output in zip(audio_files, outputs):
+        if audio.suffix.lower() == ".mp4":
+            assert ffmpeg is not None
+            model_audio, audio_duration = _decode_mp4(audio, ffmpeg)
+            asr_input: Any = (model_audio, SAMPLE_RATE)
+        else:
+            audio_duration = durations[audio]
+            asr_input = str(audio)
         result = model.transcribe(
-            audio=str(audio),
+            audio=asr_input,
             language="Chinese",
             return_time_stamps=True,
         )
@@ -169,7 +239,7 @@ def transcribe_directory(
         document = {
             "version": "qwen_asr_v1",
             "audio": audio.name,
-            "audio_duration_sec": durations[audio],
+            "audio_duration_sec": audio_duration,
             "language": "Chinese",
             "timeline": "original_audio_video",
             "time_unit": "second",
@@ -190,9 +260,11 @@ def transcribe_directory(
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Transcribe WAV files with local Qwen3-ASR and forced alignment"
+        description="Transcribe WAV or MP4 files with local Qwen3-ASR and forced alignment"
     )
-    parser.add_argument("--input", required=True, type=Path, help="directory containing WAV files")
+    parser.add_argument(
+        "--input", required=True, type=Path, help="directory containing WAV or MP4 files"
+    )
     parser.add_argument("--model", type=Path, default=DEFAULT_MODEL)
     parser.add_argument("--aligner", type=Path, default=DEFAULT_ALIGNER)
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cuda")
@@ -210,7 +282,7 @@ def main() -> int:
         )
     except (OSError, QwenTranscriptionError) as exc:
         parser.exit(1, f"Error: {exc}\n")
-    print(f"Audio files transcribed: {len(outputs)}")
+    print(f"Media files transcribed: {len(outputs)}")
     return 0
 
 

@@ -198,7 +198,7 @@ NeckPoseSet 0 0 0 0
 
 `rough_transcribe.py` 使用 `dataset/models/asr/{paraformer-zh,fsmn-vad,ct-punc}` 对指定目录内同名 MP4/WAV 对进行离线中文识别，每个视频原子写入一个同名 `rough_transcript_v1` JSON。JSON 使用完整音视频的秒时间轴，包含带标点的 `segments[{id,start_sec,end_sec,text}]`，并固定标记 `review.status=pending`；已有 JSON 默认拒绝覆盖，只有明确传入 `--force` 才能替换。该输出仅是人工审核初稿。
 
-`qwen_transcribe.py` 递归处理指定目录内的 16 kHz mono PCM s16 WAV，使用本地 `models/qwen` Qwen3-ASR-1.7B 和 `models/qwen3-forced-aligner`，固定 `language=Chinese` 并启用 forced alignment。每个 WAV 在原目录旁原子写入 `<stem>.qwen_asr_v1.json`，保留完整 `text` 与字级 `timestamps[{text,start_time,end_time}]`，并固定标记 `review.status=pending`；默认拒绝覆盖任何已有 Qwen JSON，只有显式 `--force` 才替换。该结果只供人工组装和审核，不是人工标注真源。
+`qwen_transcribe.py` 递归处理指定目录内的 WAV 或 MP4，使用本地 `models/qwen` Qwen3-ASR-1.7B 和 `models/qwen3-forced-aligner`，固定 `language=Chinese` 并启用 forced alignment。WAV 仍严格要求 16 kHz mono PCM s16；MP4 通过 ffmpeg pipe 只读解码为相同格式并以 `(float32 waveform,16000)` 直接送入模型，不生成中间 WAV、不修改原视频。每个输入在原目录旁原子写入 `<stem>.qwen_asr_v1.json`，`audio` 记录真实输入文件名，保留完整 `text` 与字级 `timestamps[{text,start_time,end_time}]`，并固定标记 `review.status=pending`；同目录同 stem 的 WAV/MP4 会因输出冲突而拒绝，已有 JSON 默认拒绝覆盖，只有显式 `--force` 才替换。该结果只供人工组装和审核，不是人工标注真源。
 
 ### 5.7 主播人脸选择诊断
 
@@ -207,6 +207,22 @@ NeckPoseSet 0 0 0 0
 ### 5.8 主播视频 embedding 与相似度诊断
 
 `speaker_similarity.py` 对原始视频目录内全部顶层视频复用相同的五帧采样与主人脸选择规则，汇总每个视频成功帧的 InsightFace normed embedding：先求算术均值，再做一次 L2 normalize，得到唯一 `video_embedding`；五帧全部失败的视频显式标记为 unresolved。脚本只计算有效视频间的 embedding 点积（cosine similarity），输出按文件名排序的 `video_embeddings.npz`、100×100 `similarity_matrix.npy`（unresolved 行列为 NaN）、每视频前五近邻 `top5_neighbors.jsonl` 和 `manifest.json`，并报告非对角唯一视频对及逐视频 Top-1 的 min/mean/median/max。gender 仅作为 metadata，不参与计算；该诊断不使用阈值、不聚类、不生成 speaker ID，也不修改原始视频。输出同样原子发布且默认拒绝覆盖。
+
+### 5.9 最终主播身份映射
+
+原 `speaker_similarity_v1` 产物中的 99 个有效视频以 cosine similarity `>= 0.50` 建立无向边，并以 connected components 生成全局唯一 `speaker_0001`～`speaker_0009`；编号按 similarity matrix 的文件名顺序首次遇到 component 的顺序确定。`datasets/zhubo_shuo_lianbo/speaker_mapping.json` 是按视频文件名排序的 JSON array，每项固定为 `{video,speaker_id,gender}`；gender 只来自 embedding 诊断 metadata，不参与建图。低质量视频 `RPQbD38py38.mp4`、`wM8M9Uz3zpw.mp4` 及其映射记录已删除，当前映射 97 条，九个 speaker 的记录数依次为 `19/15/14/6/12/3/7/17/4`；其中历史映射项 `4JZOAXfXtdc.mp4` 的原片此前已删除，因此 `videos/` 当前实际有 96 个 MP4。原 `speaker_similarity_v1` 仍保留生成映射时使用的 100×100 审计矩阵，不随原片删除而改写。
+
+### 5.10 音频损坏诊断
+
+`audio_corruption_debug.py` 在正式切分前只读处理原视频：通过 ffmpeg pipe 将音轨解码为 16 kHz mono PCM，不生成中间 WAV、不修改原片；按视频 stem 匹配指定目录下已有的 `*.qwen_asr_v1.json`，并使用 Dataset 自有 `models/silero_vad/silero_vad.jit`。诊断以 1 秒窗口计算 RMS/dBFS、Silero 512-sample 帧的 speech ratio 及 Qwen timestamp 覆盖；窗口同时满足 `RMS >= -30 dBFS`、`speech ratio <= 0.10`、无 timestamp 重叠时记为异常。连续异常达到 10 秒，或异常总时长占完整音轨至少 15%，状态为 `suspected_corrupt_audio`。输出 `audio_corruption_debug/{results.jsonl,manifest.json}`，只提供候选和证据，不自动删除或切分视频；输出原子发布且默认拒绝覆盖。全部匹配 transcript 必须事先存在，否则整批拒绝启动，避免静默漏检。
+
+### 5.11 Fragment 自动切分诊断
+
+`fragment_split_debug.py` 只处理一个 MP4 及其同 stem `qwen_asr_v1` JSON，不裁剪媒体。脚本将 Qwen 完整文本中的标点重新附着到字级 timestamp，语义完整优先：理想时长 2～8 秒，8～10 秒正常接受，为等待句号/问号/叹号等完整句边界可延长至 12 秒；只有超过 12 秒仍无完整句边界时，才按 `0.8/0.5/0.3s` 停顿和逗号、顿号、分号等弱标点选择内部自然边界，最后在 12 秒内强制切分。不会仅因接近 8～10 秒就在明显未结束的弱标点处切断；以“因为/但是/如果/所以”等连接结构结尾的候选也不作为自然边界。不足 1.5 秒的结果按合并后是否超过 12 秒及接近理想时长的代价优先并入前后片段。输出 `fragments.json`，边界仍为 `review.status=pending` 的诊断建议，不是人工标注真源，任何 RPY/训练步骤不得直接消费。当前已对 `videos/` 中全部 96 个现存 MP4 生成 `fragment_split_debug/<video_stem>/fragments.json`：共 1511 个 fragment，其中 2 个超过 12 秒、0 个短于 1.5 秒；这只是冻结 V1 规则的全量诊断产物，未裁剪媒体。
+
+### 5.12 Fragment 质量诊断
+
+`fragment_quality_debug.py` 只读扫描 `fragment_split_debug/*/fragments.json`，不改写边界、不删除数据、不裁剪媒体。逐 fragment 检查空文本、至多 5 个 lexical character 的极短文本、连续重复、控制字符/常见乱码、以逗号/顿号/分号/冒号或未完成连接词结尾，以及文字—时长失配（至少 15 字且超过 7 字/s；至多 12 字且时长至少 6s）；视频 fragment 数少于 5 或多于 30 时把视频级 flag 附到该视频各记录，仅表示 `suspected` 而非确认错误。输出 `fragment_quality_debug/{results.jsonl,manifest.json}`，采用 staging directory 原子发布且默认拒绝覆盖。当前 96 个视频、1511 个 fragment 的结果为 1303 `ok`、208 `suspected`；reason 次数见 manifest。该诊断仍不是人工审核，不得作为删除、RPY 或训练的自动依据。
 
 Algorithm 暂无可用训练入口，不得从训练代码隐式触发任何 Dataset 处理。
 
@@ -218,7 +234,7 @@ Project-Neck/
 ├── dataset/                   # 原始采集 + 人工标注消费
 │   ├── configs/               # youtube.yaml（采集）、cleaning.yaml（Clean V2）
 │   ├── datasets/zhubo_shuo_lianbo/  # videos/、人工标注包、派生产物（gitignored）
-│   ├── models/                # mediapipe、FunASR、Qwen3-ASR 与 forced aligner 本地模型
+│   ├── models/                # mediapipe、FunASR、Qwen3-ASR、forced aligner、Silero VAD 本地模型
 │   └── src/
 │       ├── crawler/           # 原始视频采集
 │       └── processing/        # Clean V2、人工包校验、RPY 派生、诊断可视化
@@ -298,6 +314,7 @@ export TAVILY_API_KEY="<your-key>"  # web_search 后端
 export VOLCENGINE_TTS_API_KEY="<your-key>"
 export VOLCENGINE_TTS_SPEAKER="zh_female_vv_uranus_bigtts"  # 可选，未设置时即使用此默认值
 python tools/qwen_streaming_server.py
+# 每轮 Doubao TTS 完成后先原子覆盖保存 /home/jhl/projects/Project-Neck/tmp/robot.wav，再通过 WebSocket 发送同一份音频
 # 仅诊断 DeepSeek Responses event 时追加 --debug-deepseek-events
 
 # Audio 客户端（Ubuntu 本机 PulseAudio/PipeWire；服务端需先运行）
@@ -351,9 +368,24 @@ python -m src.processing.prepare_video_audio \
 python -m src.processing.rough_transcribe \
   --input datasets/zhubo_shuo_lianbo/clean_v2/male/kanghui/Test
 
-# 本地 Qwen3-ASR + forced aligner；递归写入相邻的 *.qwen_asr_v1.json
+# 本地 Qwen3-ASR + forced aligner；WAV/MP4 均递归写入相邻的 *.qwen_asr_v1.json
+# MP4 音轨只读 pipe 解码，不生成中间 WAV
 python -m src.processing.qwen_transcribe \
-  --input datasets/zhubo_shuo_lianbo/clean_v2/male/kanghui
+  --input datasets/zhubo_shuo_lianbo/videos
+
+# 只读解码原视频音轨，联合已有 Qwen timestamps、RMS 与 Silero VAD 诊断损坏候选
+python -m src.processing.audio_corruption_debug \
+  --input datasets/zhubo_shuo_lianbo/videos \
+  --transcripts /path/to/qwen_transcript_root
+
+# 单视频 Qwen 文本/字时间戳的 fragment 边界诊断；不裁剪媒体
+python -m src.processing.fragment_split_debug \
+  --video datasets/zhubo_shuo_lianbo/videos/07OiKCM0h54.mp4 \
+  --transcript datasets/zhubo_shuo_lianbo/videos/07OiKCM0h54.qwen_asr_v1.json \
+  --output datasets/zhubo_shuo_lianbo/fragment_split_debug/07OiKCM0h54/fragments.json
+
+# 全量只读检查 fragment 文本、语义结尾、文字/时长及视频 fragment 数
+python -m src.processing.fragment_quality_debug
 
 ANN=datasets/zhubo_shuo_lianbo/processing_test/Test_0000_manual_v1/metadata.jsonl
 VIDEO=datasets/zhubo_shuo_lianbo/videos/Test.mp4

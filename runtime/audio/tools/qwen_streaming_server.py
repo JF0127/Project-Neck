@@ -27,6 +27,7 @@ from runtime.contracts import (  # noqa: E402
 )
 from runtime.dialogue import DeepSeekDialogue, DialogueError  # noqa: E402
 from runtime.doubao_tts import DoubaoTTS  # noqa: E402
+from runtime.inference.artifacts import write_wav_atomic  # noqa: E402
 from runtime.logging_utils import log  # noqa: E402
 from runtime.tts import EdgeTTS, TTS  # noqa: E402
 from runtime.vad import SileroVAD  # noqa: E402
@@ -34,6 +35,7 @@ from runtime.vad import SileroVAD  # noqa: E402
 MODEL_PATH = PROJECT_ROOT / "dataset" / "models" / "qwen"
 VAD_MODEL_PATH = PROJECT_ROOT / "runtime" / "models" / "silero_vad" / "silero_vad.jit"
 RUNTIME_CONFIG_PATH = PROJECT_ROOT / "runtime" / "config.yaml"
+ROBOT_WAV_PATH = "/home/jhl/projects/Project-Neck/tmp/robot.wav"
 SYSTEM_PROMPT = "你是一个机器人助手，请使用自然、简洁的中文进行对话。"
 SAMPLE_RATE = 16_000
 PRE_ROLL_FRAMES = 20  # 400 ms, covering Silero's speech confirmation delay.
@@ -233,6 +235,12 @@ class QwenStreamingRuntime:
     async def _synthesize_and_send(self, assistant_text: str) -> None:
         try:
             speech = await self.tts.synthesize(assistant_text)
+            await asyncio.to_thread(
+                write_wav_atomic,
+                ROBOT_WAV_PATH,
+                speech.pcm_s16le,
+            )
+            log(f"[tts] saved: {ROBOT_WAV_PATH}")
             sender = self._send_robot_audio
             if sender is not None:
                 await sender(speech)

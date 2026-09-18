@@ -1,6 +1,6 @@
 """Model input construction, inference, output postprocessing and artifacts."""
 
-from .artifacts import GenerationArtifacts, save_generation
+from .artifacts import GenerationArtifacts, save_generation, write_wav_atomic
 from .base import MOTION_FPS, MotionBackend, validate_motion_output
 from .default_motion import DEFAULT_GENERATION_FALLBACK_TEXT, default_motion_output
 from .generator import GeneratedTurn, PoseUnavailableError, TurnGenerator
@@ -20,4 +20,5 @@ __all__ = [
     "final_trajectory_to_motor_document",
     "save_generation",
     "validate_motion_output",
+    "write_wav_atomic",
 ]
