@@ -18,6 +18,7 @@ from .motion_compiler import (
     compile_motion_plan,
     parse_motion_plan_with_rejections,
 )
+from .speech_alignment import SpeechAlignment, align_speech
 
 DEFAULT_MODEL = "deepseek-flash"
 DEFAULT_BASE_URL = "https://api.deepseek.com"
@@ -28,6 +29,8 @@ PLAN_FILENAME = "deepseek_motion_plan.json"
 RELATIVE_TRAJECTORY_FILENAME = "deepseek_relative_trajectory.json"
 
 MOTION_SYSTEM_PROMPT = """你是仿生机器人颈部动作规划器。根据机器人即将说出的文本和语音总时长，生成少量、自然、克制的颈部 gesture。
+
+输入中的 robot_text 决定动作语义，segments 给出该文本在真实 TTS 音频中的时间位置。动作时间应优先与相关语义 segment 对齐，不要只根据总 duration 猜测语句发生时间。segments 缺失时才按 robot_text 和 duration_sec 规划。
 
 你必须只输出一个合法 JSON 对象，不得输出 Markdown、代码围栏、解释或其他文字。JSON schema 严格为：
 {"actions":[{"start":0.35,"end":1.25,"roll":0.0,"pitch":2.5,"yaw":0.0}]}
@@ -62,6 +65,7 @@ class DeepSeekMotionBackend(MotionBackend):
         output_dir: str | Path = "generated",
         client: Any | None = None,
         client_factory: Callable[..., Any] | None = None,
+        aligner: Callable[..., SpeechAlignment] = align_speech,
     ) -> None:
         if not model.strip():
             raise ValueError("DeepSeek Motion model must not be empty")
@@ -86,6 +90,9 @@ class DeepSeekMotionBackend(MotionBackend):
         self.relative_trajectory_path = (
             self.output_dir / RELATIVE_TRAJECTORY_FILENAME
         )
+        if not callable(aligner):
+            raise TypeError("aligner must be callable")
+        self._aligner = aligner
 
         if client is not None:
             self._client = client
@@ -128,9 +135,20 @@ class DeepSeekMotionBackend(MotionBackend):
                     parts.append(text)
         return "".join(parts).strip()
 
-    def _request_plan(self, robot_text: str, duration_sec: float) -> str:
+    def _request_plan(
+        self,
+        robot_text: str,
+        duration_sec: float,
+        segments: list[dict[str, str | float]] | None,
+    ) -> str:
+        payload: dict[str, Any] = {
+            "robot_text": robot_text,
+            "duration_sec": duration_sec,
+        }
+        if segments is not None:
+            payload["segments"] = segments
         user_input = json.dumps(
-            {"robot_text": robot_text, "duration_sec": duration_sec},
+            payload,
             ensure_ascii=False,
             separators=(",", ":"),
         )
@@ -155,6 +173,44 @@ class DeepSeekMotionBackend(MotionBackend):
             raise DeepSeekMotionError("DeepSeek Motion returned empty output")
         return text
 
+    def _align_speech(
+        self, robot_text: str, speech: RobotSpeech
+    ) -> tuple[list[dict[str, str | float]] | None, dict[str, Any]]:
+        started = time.perf_counter()
+        try:
+            result = self._aligner(
+                robot_text,
+                speech.pcm_s16le,
+                speech.duration_sec,
+                sample_rate=16_000,
+            )
+            if not isinstance(result, SpeechAlignment):
+                raise TypeError("aligner must return SpeechAlignment")
+            segments = result.segments_as_dicts()
+            if result.fallback_reason:
+                log(f"[MOTION][ALIGN] fallback: {result.fallback_reason}")
+            log(f"[MOTION][ALIGN] method={result.method}")
+            log(
+                "[MOTION][ALIGN] segments="
+                + json.dumps(
+                    segments,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+            )
+            log(f"[MOTION][ALIGN] latency={result.latency_sec:.3f}s")
+            return segments, result.metadata()
+        except Exception as exc:
+            latency = time.perf_counter() - started
+            reason = f"{type(exc).__name__}: {exc}"
+            log(f"[MOTION][ALIGN] fallback: {reason}")
+            log(f"[MOTION][ALIGN] latency={latency:.3f}s")
+            return None, {
+                "method": "text_duration_fallback",
+                "latency_sec": latency,
+                "fallback_reason": reason,
+            }
+
     def _write_plan_artifact(
         self,
         robot_text: str,
@@ -162,6 +218,8 @@ class DeepSeekMotionBackend(MotionBackend):
         raw_response: str | None,
         actions: tuple[SparseMotionAction, ...] | None,
         rejected_actions: tuple[RejectedMotionAction, ...] | None,
+        segments: list[dict[str, str | float]] | None,
+        alignment: dict[str, Any],
         error: str | None,
     ) -> None:
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -179,6 +237,8 @@ class DeepSeekMotionBackend(MotionBackend):
                 if rejected_actions is not None
                 else None
             ),
+            "segments": segments,
+            "alignment": alignment,
             "error": error,
             "created_unix_sec": time.time(),
         }
@@ -244,9 +304,12 @@ class DeepSeekMotionBackend(MotionBackend):
         raw_response: str | None = None
         parsed_actions: tuple[SparseMotionAction, ...] | None = None
         rejected_actions: tuple[RejectedMotionAction, ...] | None = None
+        segments, alignment = self._align_speech(robot_text.strip(), speech)
         log("[MOTION] request_start")
         try:
-            raw_response = self._request_plan(robot_text.strip(), duration_sec)
+            raw_response = self._request_plan(
+                robot_text.strip(), duration_sec, segments
+            )
             try:
                 document = json.loads(raw_response)
             except json.JSONDecodeError as exc:
@@ -272,6 +335,8 @@ class DeepSeekMotionBackend(MotionBackend):
                 raw_response,
                 parsed_actions,
                 rejected_actions,
+                segments,
+                alignment,
                 None,
             )
             self._write_relative_trajectory(
@@ -294,6 +359,8 @@ class DeepSeekMotionBackend(MotionBackend):
                 raw_response,
                 parsed_actions,
                 rejected_actions,
+                segments,
+                alignment,
                 str(exc),
             )
             raise DeepSeekMotionError(str(exc)) from exc

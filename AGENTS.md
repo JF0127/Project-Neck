@@ -27,7 +27,7 @@ tools/      项目级分析/可视化工具
 | Algorithm | Baseline V1（audio+text → 30 fps `rpy_offset`）已实现；训练产物在 `algorithm/outputs/`（gitignored）。部署包 `runtime/models/baseline/{model.pt,vocab.json,config.yaml}`（TorchScript，gitignored） |
 | Runtime | 当前 Ubuntu 主链为 Silero VAD + Qwen3-ASR Streaming + DeepSeek 对话 + Doubao TTS；动作使用 DeepSeek sparse plan。默认 `motion.send_to_motor=false`，只生成 relative trajectory artifact，不启动反馈或连接 Motor；显式开启后才经 MotionProcessor 发送 Motor（见 §3） |
 | Motor | SOEM EtherCAT 主站；三电机；`model` / `measurement` / `feedback` 三个 UDS；速度后处理。反馈需先手动归零（§4.4） |
-| Motion | 默认 `DeepSeekMotionBackend` 根据 robot text 与 TTS duration 生成稀疏动作；`BaselineV1Backend` 与部署包仍保留用于 A/B，接口固定在 `runtime/inference/MotionBackend` |
+| Motion | 默认 `DeepSeekMotionBackend` 根据 robot text、TTS duration 和真实 PCM 的 phrase alignment 生成稀疏动作；`BaselineV1Backend` 与部署包仍保留用于 A/B，接口固定在 `runtime/inference/MotionBackend` |
 
 仓库当前**没有自动化测试目录**（已按维护成本约定删除）；验证依靠运行命令、`ctest`（motor 保留原有 C++ 测试）和手动真机测试。
 
@@ -40,7 +40,7 @@ tools/      项目级分析/可视化工具
                      ┌────────────────────────────────────────────────┤
                      │  robot.wav / metadata.json                     │  PCM
                      ▼                                                ▼
-  DeepSeek sparse plan → deepseek_relative_trajectory.json             │
+  PCM phrase alignment → DeepSeek sparse plan → deepseek_relative_trajectory.json
                      │                                                │
                      ├─ send_to_motor=false: 仅保存 relative artifact ─┤
                      │                                                │
@@ -56,7 +56,8 @@ tools/      项目级分析/可视化工具
     → MotorFeedbackMonitor → RobotState(head_rpy rad, valid, timestamp, motion_executing)
 ```
 
-- 产物目录（每轮覆盖）：`runtime/generated/{robot.wav, deepseek_motion_plan.json, deepseek_relative_trajectory.json, metadata.json}`；开启 Motor 发送时另写 `trajectory.json`。plan 保存原始响应、接受和丢弃的 actions；relative trajectory 固定 30 fps、radian、`[roll,pitch,yaw]`，不经过 measured RPY 或 MotionProcessor。
+- 产物目录（每轮覆盖）：`runtime/generated/{robot.wav, deepseek_motion_plan.json, deepseek_relative_trajectory.json, metadata.json}`；开启 Motor 发送时另写 `trajectory.json`。plan 保存原始响应、接受和丢弃的 actions、phrase segments 及 alignment metadata；relative trajectory 固定 30 fps、radian、`[roll,pitch,yaw]`，不经过 measured RPY 或 MotionProcessor。
+- Speech Alignment 在完整 TTS PCM 生成后执行：中文文本保守切为最多 4 个 phrase，优先使用 10 ms PCM RMS 检测到的真实停顿边界，其次使用局部低能量 valley；证据不足时显式标记 `proportional_fallback`，PCM 无效等失败则 DeepSeek Motion 回退到原 `text + duration` payload，不影响语音或该轮 Motion 请求。
 - DeepSeek action 是互不累计的 gesture amplitude：每个动作在自身区间按 40% minimum-jerk 上升、20% peak HOLD、40% minimum-jerk 回到 relative neutral；动作至少 0.7 s，动作间至少 0.2 s neutral HOLD。硬幅度限制仍为单轴 ±5°，prompt 通常限制 roll 1.5°、pitch/yaw 2.5°。局部非法 action 被丢弃而保留其他合法 gesture；最终无合法 action、API 或完整 JSON 失败时本轮 audio-only。MotionProcessor 的 24-frame neutral safety tail 同样使用 minimum-jerk。
 - DeepSeek Motion API/JSON/compiler/Motor/反馈失败均只跳过本轮动作，语音正常播放，不使用默认摇头；`head_rpy_valid == false` 同样只播音频。Baseline A/B 路径仍保留原 fallback。
 - Qwen 主链等待 Audio Client 在实际启动本地播放时回传 `robot_playback_started`，随后发送轨迹；`motion.sync_offset_ms` 仅作为该事件之后的微调（当前为 0）。
@@ -302,8 +303,8 @@ fi
 source runtime/.venv/bin/activate
 python -m runtime
 
-# DeepSeek gesture compiler 纯软件回归测试（fake API，不连接 Motor）
-python -m unittest runtime.inference.motion_compiler_test -v
+# DeepSeek gesture compiler + TTS PCM alignment 纯软件回归测试（fake API，不连接 Motor）
+python -m unittest runtime.inference.motion_compiler_test runtime.inference.speech_alignment_test -v
 
 # Motor：只编译与软件测试（不要启动 executable，除非明确要做真机测试）
 cmake -S runtime/motor -B runtime/motor/build
