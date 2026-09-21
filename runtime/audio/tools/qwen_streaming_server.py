@@ -18,11 +18,15 @@ PROJECT_ROOT = AUDIO_ROOT.parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from runtime.__main__ import load_config  # noqa: E402
+from runtime.__main__ import build_motion_components, load_config  # noqa: E402
 from runtime.audio_server import AudioWebSocketServer  # noqa: E402
 from runtime.contracts import (  # noqa: E402
     DialogueRequest,
+    MotionRequest,
+    RobotSpeech,
+    RobotState,
     SessionContext,
+    TurnContext,
     TurnSummary,
 )
 from runtime.dialogue import DeepSeekDialogue, DialogueError  # noqa: E402
@@ -39,6 +43,11 @@ ROBOT_WAV_PATH = "/home/jhl/projects/Project-Neck/tmp/robot.wav"
 SYSTEM_PROMPT = "你是一个机器人助手，请使用自然、简洁的中文进行对话。"
 SAMPLE_RATE = 16_000
 PRE_ROLL_FRAMES = 20  # 400 ms, covering Silero's speech confirmation delay.
+PLAYBACK_START_TIMEOUT_SEC = 30.0
+
+
+def _server_log(event: str) -> None:
+    log(f"[SERVER] {event} mono={time.monotonic():.6f}")
 
 
 class QwenStreamingRuntime:
@@ -50,6 +59,11 @@ class QwenStreamingRuntime:
         vad_model_path: Path,
         dialogue: DeepSeekDialogue,
         tts: TTS,
+        robot_state: RobotState | None = None,
+        turn_generator: Any | None = None,
+        neck_sender: Any | None = None,
+        motion_sync_offset_ms: int = 0,
+        motion_send_to_motor: bool = True,
     ) -> None:
         from qwen_asr import Qwen3ASRModel
 
@@ -67,6 +81,11 @@ class QwenStreamingRuntime:
         )
         self.dialogue = dialogue
         self.tts = tts
+        self.robot_state = robot_state or RobotState()
+        self.turn_generator = turn_generator
+        self.neck_sender = neck_sender
+        self.motion_sync_offset_ms = int(motion_sync_offset_ms)
+        self.motion_send_to_motor = bool(motion_send_to_motor)
         self._send_robot_audio: Any | None = None
         self._output_task: asyncio.Task[None] | None = None
         self._session = SessionContext(session_id="qwen_streaming_dialogue")
@@ -76,6 +95,9 @@ class QwenStreamingRuntime:
         self._speech_started_at: float | None = None
         self._speech_ended_at: float | None = None
         self._pre_roll: deque[bytes] = deque(maxlen=PRE_ROLL_FRAMES)
+        self._expected_robot_stream_id: str | None = None
+        self._playback_started_future: asyncio.Future[None] | None = None
+        self._motion_send_tasks: set[asyncio.Task[None]] = set()
         self._connected = False
 
     def connection_opened(self, send_robot_audio: Any) -> None:
@@ -85,6 +107,8 @@ class QwenStreamingRuntime:
         self._send_robot_audio = send_robot_audio
         self._session = SessionContext(session_id="qwen_streaming_dialogue")
         self._turn_number = 0
+        self._expected_robot_stream_id = None
+        self._playback_started_future = None
         self._reset_stream()
         log("waiting for speech")
 
@@ -95,6 +119,10 @@ class QwenStreamingRuntime:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
         self._output_task = None
+        future, self._playback_started_future = self._playback_started_future, None
+        if future is not None and not future.done():
+            future.cancel()
+        self._expected_robot_stream_id = None
         self._send_robot_audio = None
         self.vad.reset()
         self._pre_roll.clear()
@@ -105,8 +133,23 @@ class QwenStreamingRuntime:
         self.vad.reset()
         self._pre_roll.clear()
 
+    def robot_audio_stream_started(self, stream_id: str) -> None:
+        self._expected_robot_stream_id = stream_id
+
     def robot_audio_send_started(self) -> None:
         log("audio send_start")
+
+    def robot_playback_started(self, stream_id: str) -> None:
+        if stream_id != self._expected_robot_stream_id:
+            log(
+                "[SERVER] ignored playback_started for unexpected "
+                f"stream_id={stream_id} mono={time.monotonic():.6f}"
+            )
+            return
+        _server_log(f"playback_started stream_id={stream_id}")
+        future = self._playback_started_future
+        if future is not None and not future.done():
+            future.set_result(None)
 
     def audio_stream_ended(self) -> None:
         completed = self.vad.end_stream()
@@ -117,7 +160,6 @@ class QwenStreamingRuntime:
 
     def push_audio_frame(self, pcm_frame: bytes) -> None:
         if self._output_task is not None and not self._output_task.done():
-            self.vad.push(pcm_frame)
             return
 
         if self._state is None:
@@ -149,6 +191,7 @@ class QwenStreamingRuntime:
         self._speech_started_at = time.perf_counter()
         self._speech_ended_at = None
         log("speech_start")
+        _server_log("speech_start")
 
     def _push_pcm(self, pcm: bytes) -> None:
         if self._state is None or not pcm:
@@ -166,6 +209,7 @@ class QwenStreamingRuntime:
             else 0.0
         )
         log(f"speech_end: speech_duration={speech_duration:.3f}s")
+        _server_log(f"speech_end duration={speech_duration:.3f}s")
 
     def _finish_speech(self, *, request_dialogue: bool) -> None:
         if self._state is None:
@@ -189,6 +233,7 @@ class QwenStreamingRuntime:
         self._speech_started_at = None
         self._speech_ended_at = None
         if request_dialogue and final_text:
+            _server_log("dialogue_start")
             assistant_text = self._reply(final_text)
             if assistant_text is not None:
                 self._schedule_tts(assistant_text)
@@ -228,23 +273,126 @@ class QwenStreamingRuntime:
         if self._output_task is not None and not self._output_task.done():
             log("[tts] output already in progress; skipping duplicate")
             return
-        self._output_task = asyncio.create_task(
-            self._synthesize_and_send(assistant_text)
+        task = asyncio.create_task(self._synthesize_and_send(assistant_text))
+        self._output_task = task
+        task.add_done_callback(self._output_task_done)
+
+    def _output_task_done(self, task: asyncio.Task[None]) -> None:
+        if self._output_task is task:
+            self._output_task = None
+        _server_log("turn_complete")
+
+    async def _generate_motion(
+        self, assistant_text: str, speech: RobotSpeech
+    ) -> Any | None:
+        if self.turn_generator is None:
+            return None
+        if self.motion_send_to_motor:
+            if self.neck_sender is None:
+                log("[MOTION] skipped: motor sender is unavailable")
+                return None
+            if not self.robot_state.motor_available:
+                log("[MOTION] skipped: motor unavailable")
+                return None
+            if not self.robot_state.head_rpy_valid:
+                log("[MOTION] skipped: head_rpy invalid")
+                return None
+            if self.robot_state.motion_executing:
+                log("[MOTION] skipped: a neck trajectory is already executing")
+                return None
+
+        turn = TurnContext(
+            turn_id=f"qwen_turn_{self._turn_number}",
+            robot_text=assistant_text,
+            robot_speech=speech,
+            status="outputting",
         )
+        request = MotionRequest.snapshot(turn, self._session, self.robot_state)
+        try:
+            generation = (
+                self.turn_generator.generate
+                if self.motion_send_to_motor
+                else self.turn_generator.generate_relative
+            )
+            return await asyncio.to_thread(generation, request, turn.turn_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log(f"[MOTION] skipped: {type(exc).__name__}: {exc}")
+            return None
+
+    async def _send_motion(self, document: dict) -> None:
+        log(f"[MOTION] send_start mono={time.monotonic():.6f}")
+        try:
+            await asyncio.to_thread(self.neck_sender.send, document)
+        except Exception as exc:
+            log(
+                "[MOTION] skipped: motor send failed: "
+                f"{type(exc).__name__}: {exc}"
+            )
+        finally:
+            log(f"[MOTION] send_return mono={time.monotonic():.6f}")
+
+    def _start_motion_send(self, document: dict) -> None:
+        task = asyncio.create_task(self._send_motion(document))
+        self._motion_send_tasks.add(task)
+        task.add_done_callback(self._motion_send_tasks.discard)
+
+    async def _send_audio_and_motion(
+        self, speech: RobotSpeech, generated: Any | None
+    ) -> None:
+        sender = self._send_robot_audio
+        if sender is None:
+            return
+        should_send_motion = (
+            generated is not None
+            and generated.document is not None
+            and self.neck_sender is not None
+        )
+        playback_future: asyncio.Future[None] | None = None
+        if should_send_motion:
+            playback_future = asyncio.get_running_loop().create_future()
+            self._playback_started_future = playback_future
+
+        audio_task = asyncio.create_task(sender(speech))
+        try:
+            if should_send_motion and playback_future is not None:
+                try:
+                    await asyncio.wait_for(
+                        asyncio.shield(playback_future),
+                        timeout=PLAYBACK_START_TIMEOUT_SEC,
+                    )
+                except asyncio.TimeoutError:
+                    log("[MOTION] skipped: playback_started timeout")
+                else:
+                    if self.motion_sync_offset_ms > 0:
+                        await asyncio.sleep(self.motion_sync_offset_ms / 1000.0)
+                    self._start_motion_send(generated.document)
+            await audio_task
+            log("audio send_end")
+        except asyncio.CancelledError:
+            audio_task.cancel()
+            raise
+        finally:
+            if self._playback_started_future is playback_future:
+                self._playback_started_future = None
+            self._expected_robot_stream_id = None
 
     async def _synthesize_and_send(self, assistant_text: str) -> None:
         try:
+            _server_log("tts_start")
             speech = await self.tts.synthesize(assistant_text)
+            _server_log(
+                f"tts_ready duration={speech.duration_sec:.3f}s"
+            )
             await asyncio.to_thread(
                 write_wav_atomic,
                 ROBOT_WAV_PATH,
                 speech.pcm_s16le,
             )
             log(f"[tts] saved: {ROBOT_WAV_PATH}")
-            sender = self._send_robot_audio
-            if sender is not None:
-                await sender(speech)
-                log("audio send_end")
+            generated = await self._generate_motion(assistant_text, speech)
+            await self._send_audio_and_motion(speech, generated)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -260,8 +408,8 @@ def build_dialogue(
     config_path: Path,
     *,
     debug: bool,
-) -> tuple[DeepSeekDialogue, TTS]:
-    config, _ = load_config(config_path)
+) -> tuple[DeepSeekDialogue, TTS, dict[str, Any], Path]:
+    config, resolved_config_path = load_config(config_path)
     dialogue_config = config.get("dialogue", {})
     if not isinstance(dialogue_config, dict):
         raise ValueError("runtime config section 'dialogue' must be a mapping")
@@ -285,7 +433,7 @@ def build_dialogue(
         )
     else:
         raise ValueError("tts.backend must be doubao or edge")
-    return dialogue, tts
+    return dialogue, tts, config, resolved_config_path
 
 
 async def serve(
@@ -297,10 +445,36 @@ async def serve(
     *,
     debug: bool,
 ) -> None:
-    dialogue, tts = build_dialogue(config_path, debug=debug)
-    runtime = QwenStreamingRuntime(model, vad_model, dialogue, tts)
+    dialogue, tts, config, resolved_config_path = build_dialogue(
+        config_path, debug=debug
+    )
+    (
+        robot_state,
+        turn_generator,
+        neck_sender,
+        monitor,
+        motion_sync_offset_ms,
+        motion_send_to_motor,
+    ) = build_motion_components(config, resolved_config_path)
+    runtime = QwenStreamingRuntime(
+        model,
+        vad_model,
+        dialogue,
+        tts,
+        robot_state=robot_state,
+        turn_generator=turn_generator,
+        neck_sender=neck_sender,
+        motion_sync_offset_ms=motion_sync_offset_ms,
+        motion_send_to_motor=motion_send_to_motor,
+    )
     server = AudioWebSocketServer(runtime, host=host, port=port)
-    await server.serve_forever()
+    if monitor is not None:
+        monitor.start()
+    try:
+        await server.serve_forever()
+    finally:
+        if monitor is not None:
+            await monitor.stop()
 
 
 def main() -> int:

@@ -31,6 +31,13 @@ def stream_end_message(stream_id: str) -> str:
     )
 
 
+def robot_playback_started_message(stream_id: str) -> str:
+    return json.dumps(
+        {"type": "robot_playback_started", "stream_id": stream_id},
+        separators=(",", ":"),
+    )
+
+
 def parse_control_message(message: str) -> Dict[str, Any]:
     try:
         data = json.loads(message)

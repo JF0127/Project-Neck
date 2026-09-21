@@ -28,8 +28,10 @@ def _interpolate(
     end: tuple[float, float, float],
     weight: float,
 ) -> tuple[float, float, float]:
+    t = min(1.0, max(0.0, float(weight)))
+    minimum_jerk = 10.0 * t**3 - 15.0 * t**4 + 6.0 * t**5
     return tuple(
-        before + (after - before) * weight
+        before + (after - before) * minimum_jerk
         for before, after in zip(start, end)
     )  # type: ignore[return-value]
 

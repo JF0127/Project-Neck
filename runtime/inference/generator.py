@@ -103,6 +103,13 @@ class TurnGenerator:
         artifacts = self._save(speech, document, "model", name)
         return GeneratedTurn(speech, document, artifacts, "model")
 
+    def generate_relative(self, request: MotionRequest, name: str) -> GeneratedTurn:
+        """Infer relative motion artifacts without measured pose or Motor JSON."""
+        speech = self._speech(request)
+        self.backend.infer(request)
+        artifacts = self._save(speech, None, "relative_only", name)
+        return GeneratedTurn(speech, None, artifacts, "relative_only")
+
     def generate_fallback(
         self, request: MotionRequest, name: str, reason: str
     ) -> GeneratedTurn:

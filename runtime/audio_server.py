@@ -48,6 +48,9 @@ class AudioWebSocketServer:
     ) -> None:
         stream_id = f"robot_{uuid.uuid4().hex}"
         send_started = time.perf_counter()
+        stream_started = getattr(self.runtime, "robot_audio_stream_started", None)
+        if callable(stream_started):
+            stream_started(stream_id)
         self.runtime.robot_audio_send_started()
         await websocket.send(
             json.dumps(
@@ -126,7 +129,22 @@ class AudioWebSocketServer:
                         raise ValueError("stream_id must be a non-empty string")
                     stream = TransportStream(stream_id)
                     self.runtime.audio_stream_started()
+                    log(
+                        f"[SERVER] user_stream_start mono={time.monotonic():.6f} "
+                        f"stream_id={stream_id}"
+                    )
                     log(f"[runtime][audio] transport stream_start: {stream_id}")
+                elif message_type == "robot_playback_started":
+                    stream_id = control.get("stream_id")
+                    if not isinstance(stream_id, str) or not stream_id:
+                        raise ValueError(
+                            "robot_playback_started stream_id must be non-empty"
+                        )
+                    callback = getattr(
+                        self.runtime, "robot_playback_started", None
+                    )
+                    if callable(callback):
+                        callback(stream_id)
                 elif message_type == "stream_end":
                     if stream is None:
                         raise ValueError("stream_end received without stream_start")

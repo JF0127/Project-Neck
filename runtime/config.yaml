@@ -26,9 +26,15 @@ runtime:
   cooldown_ms: 200
 motion:
   enabled: true
-  model_path: models/baseline/model.pt
-  vocab_path: models/baseline/vocab.json
-  device: auto
+  backend: deepseek
+  send_to_motor: true
+  deepseek_model: deepseek-flash
+  deepseek_timeout_sec: 15.0
+  deepseek_temperature: 0.2
+  deepseek_max_output_tokens: 1024
+  model_path: models/baseline/model.pt  # used when backend=baseline
+  vocab_path: models/baseline/vocab.json  # used when backend=baseline
+  device: auto  # used when backend=baseline
   generated_dir: generated
   sync_offset_ms: 0
 motor:

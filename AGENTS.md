@@ -25,34 +25,41 @@ tools/      项目级分析/可视化工具
 |---|---|
 | Dataset | Clean V2 首帧以最大人物锁定主主持人，后续用人脸 identity 逐帧跟踪；忽略画中画/附加窗口内的其他人物和脸。主主持人首次出现完整脸或脖子不可用时，保留此前有效前缀，删除失败帧及之后全部内容；仅第 0 帧失败等无有效前缀情况才淘汰。输出由模型自动分男女并按主播人脸 embedding 聚类 |
 | Algorithm | Baseline V1（audio+text → 30 fps `rpy_offset`）已实现；训练产物在 `algorithm/outputs/`（gitignored）。部署包 `runtime/models/baseline/{model.pt,vocab.json,config.yaml}`（TorchScript，gitignored） |
-| Runtime | 语音链 + 动作链 + 实时姿态反馈已跑通真机（见 §3）。生成产物在 `runtime/generated/`（gitignored） |
+| Runtime | 当前 Ubuntu 主链为 Silero VAD + Qwen3-ASR Streaming + DeepSeek 对话 + Doubao TTS；动作使用 DeepSeek sparse plan。默认 `motion.send_to_motor=false`，只生成 relative trajectory artifact，不启动反馈或连接 Motor；显式开启后才经 MotionProcessor 发送 Motor（见 §3） |
 | Motor | SOEM EtherCAT 主站；三电机；`model` / `measurement` / `feedback` 三个 UDS；速度后处理。反馈需先手动归零（§4.4） |
-| 模型质量 | 当前 Baseline 输出幅度约 1–2°，效果一般，后续会替换；接口固定在 `runtime/inference/MotionBackend` |
+| Motion | 默认 `DeepSeekMotionBackend` 根据 robot text 与 TTS duration 生成稀疏动作；`BaselineV1Backend` 与部署包仍保留用于 A/B，接口固定在 `runtime/inference/MotionBackend` |
 
 仓库当前**没有自动化测试目录**（已按维护成本约定删除）；验证依靠运行命令、`ctest`（motor 保留原有 C++ 测试）和手动真机测试。
 
 ## 3. Runtime 链路
 
 ```text
-生成 + 执行（每轮）:
-  user PCM ─→ VAD ─→ ASR(zh, faster-whisper large-v3) ─→ DeepSeek ─→ Doubao TTS V3
-                                                                        │
-                     ┌──────────────────────────────────────────────────┤
-                     │  robot.wav / metadata.json                       │  PCM
-                     ▼                                                  ▼
-   TorchScript 模型 → MotionProcessor → trajectory.json → /tmp/neck_model.sock
-                     │                                                  │
-                     └─────────────── 同时触发 ──────────────────────────┘
-                                        robot 音频 → WebSocket 客户端播放
+当前 Qwen Streaming 生成 + 执行（每轮）:
+  user PCM ─→ Silero VAD ─→ Qwen3-ASR Streaming ─→ DeepSeek ─→ Doubao TTS V3
+                                                                      │
+                     ┌────────────────────────────────────────────────┤
+                     │  robot.wav / metadata.json                     │  PCM
+                     ▼                                                ▼
+  DeepSeek sparse plan → deepseek_relative_trajectory.json             │
+                     │                                                │
+                     ├─ send_to_motor=false: 仅保存 relative artifact ─┤
+                     │                                                │
+                     └─ send_to_motor=true: MotionProcessor → trajectory.json
+                                              → /tmp/neck_model.sock  │
+                                                                      ▼
+                                      robot 音频 → WebSocket 客户端播放
+
+`python -m runtime` 的 Whisper 路径仍保留；它与 Qwen 主链共用相同 Motion/Motor 构建和下游接口。默认 `send_to_motor=false` 时不创建 `NeckClient`、不启动 `MotorFeedbackMonitor`，DeepSeek Motion 仍正常调用且不依赖 measured RPY。
 
 实时姿态（旁路，只读）:
   EtherCAT 反馈缓存 → FeedbackServer(30 Hz) → /tmp/neck_feedback.sock
     → MotorFeedbackMonitor → RobotState(head_rpy rad, valid, timestamp, motion_executing)
 ```
 
-- 产物目录（每轮覆盖）：`runtime/generated/{robot.wav, trajectory.json, metadata.json}`；`metadata.json` 最后写入并带 `complete: true`，作为“生成完成”的标记。
-- 兜底：生成失败 → 固定文本“抱歉，我没听清楚，请再说一遍。”+ 默认摇头轨迹（±3° yaw，1 Hz）；`head_rpy_valid == false` → 只播音频、不发轨迹。
-- 音频与轨迹通过 `motion.sync_offset_ms` 做微调（当前为 0，真机验证为同步）。
+- 产物目录（每轮覆盖）：`runtime/generated/{robot.wav, deepseek_motion_plan.json, deepseek_relative_trajectory.json, metadata.json}`；开启 Motor 发送时另写 `trajectory.json`。plan 保存原始响应、接受和丢弃的 actions；relative trajectory 固定 30 fps、radian、`[roll,pitch,yaw]`，不经过 measured RPY 或 MotionProcessor。
+- DeepSeek action 是互不累计的 gesture amplitude：每个动作在自身区间按 40% minimum-jerk 上升、20% peak HOLD、40% minimum-jerk 回到 relative neutral；动作至少 0.7 s，动作间至少 0.2 s neutral HOLD。硬幅度限制仍为单轴 ±5°，prompt 通常限制 roll 1.5°、pitch/yaw 2.5°。局部非法 action 被丢弃而保留其他合法 gesture；最终无合法 action、API 或完整 JSON 失败时本轮 audio-only。MotionProcessor 的 24-frame neutral safety tail 同样使用 minimum-jerk。
+- DeepSeek Motion API/JSON/compiler/Motor/反馈失败均只跳过本轮动作，语音正常播放，不使用默认摇头；`head_rpy_valid == false` 同样只播音频。Baseline A/B 路径仍保留原 fallback。
+- Qwen 主链等待 Audio Client 在实际启动本地播放时回传 `robot_playback_started`，随后发送轨迹；`motion.sync_offset_ms` 仅作为该事件之后的微调（当前为 0）。
 - 轨迹发送前会检查 `RobotState.motion_executing`，避免与正在执行的轨迹冲突。
 
 ## 4. 冻结接口
@@ -67,9 +74,10 @@ Runtime 是 WebSocket **server**，默认 `0.0.0.0:8765`；Audio 是 client。
 ```json
 {"type":"stream_start","stream_id":"user_<id>","source":"user","sample_rate":16000,"channels":1,"format":"pcm_s16le"}
 {"type":"stream_end","stream_id":"user_<id>"}
+{"type":"robot_playback_started","stream_id":"robot_<id>"}
 ```
 
-Robot 音频使用同一协议且 `source="robot"`。不得单端修改格式、时序、buffer 或错误语义。
+Robot 音频使用同一协议且 `source="robot"`。Client 收完 Robot stream 后，在本地 `paplay`/PortAudio 真正启动时回传对应 stream ID 的 `robot_playback_started`；Qwen Runtime 收到后才发送 Motor 轨迹。不得单端修改格式、时序、buffer 或错误语义。
 
 ### 4.2 Runtime → Motor
 
@@ -218,11 +226,15 @@ NeckPoseSet 0 0 0 0
 
 ### 5.11 Fragment 自动切分诊断
 
-`fragment_split_debug.py` 只处理一个 MP4 及其同 stem `qwen_asr_v1` JSON，不裁剪媒体。脚本将 Qwen 完整文本中的标点重新附着到字级 timestamp，语义完整优先：理想时长 2～8 秒，8～10 秒正常接受，为等待句号/问号/叹号等完整句边界可延长至 12 秒；只有超过 12 秒仍无完整句边界时，才按 `0.8/0.5/0.3s` 停顿和逗号、顿号、分号等弱标点选择内部自然边界，最后在 12 秒内强制切分。不会仅因接近 8～10 秒就在明显未结束的弱标点处切断；以“因为/但是/如果/所以”等连接结构结尾的候选也不作为自然边界。不足 1.5 秒的结果按合并后是否超过 12 秒及接近理想时长的代价优先并入前后片段。输出 `fragments.json`，边界仍为 `review.status=pending` 的诊断建议，不是人工标注真源，任何 RPY/训练步骤不得直接消费。当前已对 `videos/` 中全部 96 个现存 MP4 生成 `fragment_split_debug/<video_stem>/fragments.json`：共 1511 个 fragment，其中 2 个超过 12 秒、0 个短于 1.5 秒；这只是冻结 V1 规则的全量诊断产物，未裁剪媒体。
+`fragment_split_debug.py` 只处理一个 MP4 及其同 stem `qwen_asr_v1` JSON，不裁剪媒体。脚本将 Qwen 完整文本中的标点重新附着到字级 timestamp，语义完整优先：理想时长 2～8 秒，8～10 秒正常接受，为等待句号/问号/叹号等完整句边界可延长至 12 秒；只有超过 12 秒仍无完整句边界时，才按 `0.8/0.5/0.3s` 停顿和逗号、顿号、分号等弱标点选择内部自然边界，最后在 12 秒内强制切分。不会仅因接近 8～10 秒就在明显未结束的弱标点处切断；以“因为/但是/如果/所以”等连接结构结尾的候选也不作为自然边界。不足 1.5 秒的结果按合并后是否超过 12 秒及接近理想时长的代价优先并入前后片段。输出 `fragments.json`，边界仍为 `review.status=pending` 的诊断建议，不是人工标注真源，任何 RPY/训练步骤不得直接消费。当前已对 `videos/` 中全部 96 个现存 MP4 生成 `fragment_split_debug/<video_stem>/fragments.json`：共 1511 个 fragment，其中 2 个超过 12 秒、0 个短于 1.5 秒；统一文本审查筛出的 90 个可疑项中，63 个高置信度错字/错词已仅在 fragment 文本及其审查/质量镜像中保守修正，边界、ID、原始 Qwen ASR、媒体和 RPY 均未改动，另 27 个保留在 `fragment_quality_debug/remaining_review.jsonl` 等待听审。这些仍只是冻结 V1 规则的诊断产物，未裁剪媒体，也未成为人工标注真源。
 
 ### 5.12 Fragment 质量诊断
 
-`fragment_quality_debug.py` 只读扫描 `fragment_split_debug/*/fragments.json`，不改写边界、不删除数据、不裁剪媒体。逐 fragment 检查空文本、至多 5 个 lexical character 的极短文本、连续重复、控制字符/常见乱码、以逗号/顿号/分号/冒号或未完成连接词结尾，以及文字—时长失配（至少 15 字且超过 7 字/s；至多 12 字且时长至少 6s）；视频 fragment 数少于 5 或多于 30 时把视频级 flag 附到该视频各记录，仅表示 `suspected` 而非确认错误。输出 `fragment_quality_debug/{results.jsonl,manifest.json}`，采用 staging directory 原子发布且默认拒绝覆盖。当前 96 个视频、1511 个 fragment 的结果为 1303 `ok`、208 `suspected`；reason 次数见 manifest。该诊断仍不是人工审核，不得作为删除、RPY 或训练的自动依据。
+`fragment_quality_debug.py` 只读扫描 `fragment_split_debug/*/fragments.json`，不改写边界、不删除数据、不裁剪媒体。逐 fragment 检查空文本、至多 5 个 lexical character 的极短文本、连续重复、控制字符/常见乱码、以逗号/顿号/分号/冒号或未完成连接词结尾，以及文字—时长失配（至少 15 字且超过 7 字/s；至多 12 字且时长至少 6s）；视频 fragment 数少于 5 或多于 30 时把视频级 flag 附到该视频各记录，仅表示 `suspected` 而非确认错误。输出 `fragment_quality_debug/{results.jsonl,manifest.json}`，采用 staging directory 原子发布且默认拒绝覆盖；人工文本审查另将不能保守自动修正的条目写入同目录 `remaining_review.jsonl`。当前 96 个视频、1511 个 fragment 的结果为 1303 `ok`、208 `suspected`；reason 次数见 manifest。该诊断仍不是人工审核，不得作为删除、RPY 或训练的自动依据。
+
+### 5.13 Fragment 终端人工听审
+
+`src/tools/review_fragments.py` 只消费 `fragment_quality_debug/remaining_review.jsonl`。每条按既有时间边界用 ffmpeg 从原 MP4 只读解码临时 16 kHz mono WAV，优先以 `paplay`（再依次 `ffplay`、`aplay`）播放，支持保留、编辑、重播、跳过和退出。确认或编辑成功后立即原子更新进度；编辑仅同步对应 `fragment_split_debug/<stem>/fragments.json` 的 `text`、`fragment_review.txt`、质量 `results.jsonl/manifest.json`，不修改原始 Qwen JSON、媒体、ID、边界、RPY 或轨迹。每次操作前校验 queue 文本与当前 fragment 唯一匹配，多个镜像使用带回滚的批量替换；启动与退出时复核 96 个视频、1511 个 fragment 的 ID/时间签名以及媒体 stat 和 Qwen SHA-256。运行期使用 `/tmp/project-neck-fragment-review.lock` 防止并发审查。
 
 Algorithm 暂无可用训练入口，不得从训练代码隐式触发任何 Dataset 处理。
 
@@ -248,7 +260,7 @@ Project-Neck/
 │   ├── feedback.py            # 实时姿态 monitor
 │   ├── neck_client.py         # motor JSON 发送
 │   ├── inference/             # 模型 I/O 与产物（原 motion_core）
-│   │   ├── base.py processor.py baseline_v1.py
+│   │   ├── base.py processor.py baseline_v1.py deepseek_motion.py motion_compiler.py
 │   │   ├── motor_json.py default_motion.py generator.py artifacts.py
 │   ├── generated/             # 每轮生成的音频+轨迹（gitignored）
 │   ├── models/                # 部署资产：baseline/, whisper-large-v3-ct2, silero_vad（gitignored）
@@ -290,6 +302,9 @@ fi
 source runtime/.venv/bin/activate
 python -m runtime
 
+# DeepSeek gesture compiler 纯软件回归测试（fake API，不连接 Motor）
+python -m unittest runtime.inference.motion_compiler_test -v
+
 # Motor：只编译与软件测试（不要启动 executable，除非明确要做真机测试）
 cmake -S runtime/motor -B runtime/motor/build
 cmake --build runtime/motor/build -j"$(nproc)"
@@ -306,7 +321,7 @@ python -m runtime.qwen_asr /path/to/audio.wav
 # 固定 WAV 的 vLLM streaming 诊断：转为 16 kHz mono float32，warmup 后按 100 ms 实时时序模拟输入
 python -m runtime.qwen_asr_streaming
 
-# Ubuntu：Mac PCM → Silero VAD → Qwen3-ASR vLLM streaming → DeepSeek Responses + 本地 web_search → 完整 Doubao TTS V3 → Mac 播放（不接动作）
+# Ubuntu：PCM → Silero VAD → Qwen3-ASR vLLM streaming → DeepSeek Responses → Doubao TTS V3；TTS 后生成 sparse Motion
 cd runtime/audio
 source .venv/bin/activate
 export DEEPSEEK_API_KEY="<your-key>"
@@ -314,7 +329,7 @@ export TAVILY_API_KEY="<your-key>"  # web_search 后端
 export VOLCENGINE_TTS_API_KEY="<your-key>"
 export VOLCENGINE_TTS_SPEAKER="zh_female_vv_uranus_bigtts"  # 可选，未设置时即使用此默认值
 python tools/qwen_streaming_server.py
-# 每轮 Doubao TTS 完成后先原子覆盖保存 /home/jhl/projects/Project-Neck/tmp/robot.wav，再通过 WebSocket 发送同一份音频
+# 每轮 Doubao TTS 完成后先原子覆盖保存 /home/jhl/projects/Project-Neck/tmp/robot.wav；默认只写 relative Motion artifact，send_to_motor=true 时才连接 Motor
 # 仅诊断 DeepSeek Responses event 时追加 --debug-deepseek-events
 
 # Audio 客户端（Ubuntu 本机 PulseAudio/PipeWire；服务端需先运行）
@@ -340,7 +355,7 @@ python3 -m runtime.main duplex-test --turns 2 --duration 5
 python3 -m runtime.main conversation
 ```
 
-默认连接 `ws://10.255.0.35:8765`（可用 `AUDIO_MODULE_WS_URL` 或 `--url` 覆盖）。Linux Audio client 默认使用 PulseAudio/PipeWire 的 `parec`/`paplay`，启动采集/播放前用 `pactl` 明确选择 Rear Microphone 与 Rear Line Out；仍固定输出 16 kHz、mono、s16le、20 ms/640 bytes，不直接打开 ALSA `hw:*`。macOS 继续使用 sounddevice/PortAudio。`conversation` 与当前 `asr-stream` 都在一个 WebSocket 上持续多轮半双工运行，不逐轮重连：监听期持续发送麦克风 PCM，收到机器人 `stream_start` 后停止本轮采集；Ubuntu 在完整 TTS PCM 就绪后无实时 pacing 地快速发送 `stream_start`、全部音频帧和 `stream_end`，Mac 收到完整 `stream_end` 后才开始播放，播放完成后恢复麦克风。日志分别记录 `speech_duration`（speech_start→speech_end）、`asr_finalize_latency`（speech_end→ASR FINAL）、`audio_duration`、`network_send_time`、`playback_start/end`、`microphone_resume` 与连接关闭原因。跨机器时钟不可直接比较。
+默认连接 `ws://10.255.0.35:8765`（可用 `AUDIO_MODULE_WS_URL` 或 `--url` 覆盖）。Linux Audio client 默认使用 PulseAudio/PipeWire 的 `parec`/`paplay`，启动采集/播放前用 `pactl` 明确选择 Rear Microphone 与 Rear Line Out；仍固定输出 16 kHz、mono、s16le、20 ms/640 bytes，不直接打开 ALSA `hw:*`。macOS 继续使用 sounddevice/PortAudio。`conversation` 与当前 `asr-stream` 都在一个 WebSocket 上持续多轮半双工运行，不逐轮重连：每轮使用新的 stop event 和 `MicrophoneCapture`，收到机器人 `stream_start` 后停止本轮采集；Server 在完整 TTS PCM 就绪后无实时 pacing 地快速发送完整 Robot stream，Client 收完后启动本地播放并立即回传 `robot_playback_started`，Server 据此异步提交轨迹；播放完成后 Client 进入下一轮并重新发送 user `stream_start`。`NeckClient.send()` 只等待 Motor 解析、预检查并提交后台轨迹线程后关闭 socket，不等待整条轨迹执行完成，且不再阻塞 Qwen output turn。日志包含 `[CLIENT]/[SERVER]/[MOTION]` monotonic 时间点；跨机器 monotonic 时钟不可直接比较。
 
 ### 7.3 Dataset
 
@@ -386,6 +401,9 @@ python -m src.processing.fragment_split_debug \
 
 # 全量只读检查 fragment 文本、语义结尾、文字/时长及视频 fragment 数
 python -m src.processing.fragment_quality_debug
+
+# 逐条播放 remaining_review.jsonl；Enter 保留，e 编辑，r 重播，s 跳过，q 保存退出
+python -m src.tools.review_fragments
 
 ANN=datasets/zhubo_shuo_lianbo/processing_test/Test_0000_manual_v1/metadata.jsonl
 VIDEO=datasets/zhubo_shuo_lianbo/videos/Test.mp4
@@ -438,7 +456,7 @@ python -m algorithm.train --config algorithm/configs/baseline.yaml --epochs 50
 | `asr` | `backend: whisper`, `model_path`（large-v3 CT2）, `device: cuda/cpu`, `language: zh` |
 | `dialogue` | `backend: deepseek`, `model`（当前 `deepseek-flash` / DeepSeek-V4.1-Flash，Responses API streaming，`max_output_tokens=4096`、`reasoning.effort=none`；纯当前日期时间强制使用 `zoneinfo.ZoneInfo("Asia/Shanghai")` 的本地 `get_current_datetime`（UTC+08:00，禁止搜索或由模型自行推算/转换），天气/新闻等实时互联网信息使用本地 `web_search`（含“今天/目前/当前/最近”时自动加入上海绝对日期，每轮最多 3 次），普通静态知识自动跳过工具；默认使用适合语音播放的自然口语，回复尽量控制在 30 个汉字以内（含标点），仅在无法完整回答时才允许略微超过）, `base_url`, `timeout_sec`, `temperature` |
 | `tts` | `backend: doubao`（默认，V3 HTTP Chunked、`seed-tts-2.0`、16 kHz mono PCM；speaker 来自 `VOLCENGINE_TTS_SPEAKER`，默认 `zh_female_vv_uranus_bigtts`）；可切回 `edge` 并使用 `voice` |
-| `motion` | `enabled`, `model_path`, `vocab_path`, `device`, `generated_dir`, `sync_offset_ms` |
+| `motion` | `enabled`, `backend: deepseek/baseline`（默认 deepseek），`send_to_motor`（默认 false；false 时只生成 relative artifact且不启动反馈/Socket），DeepSeek 的 `deepseek_model/deepseek_timeout_sec/deepseek_temperature/deepseek_max_output_tokens`，Baseline 的 `model_path/vocab_path/device`，以及 `generated_dir/sync_offset_ms` |
 | `motor` | `feedback_enabled`, `feedback_socket`, `feedback_stale_sec`, `send_enabled`, `socket_path`, `measurement_socket`, `mock` |
 | `runtime` | `dialogue_fallback_text`, `cooldown_ms` |
 

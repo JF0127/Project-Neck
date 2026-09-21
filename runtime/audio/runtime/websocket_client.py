@@ -14,12 +14,22 @@ from websockets.exceptions import ConnectionClosed
 from . import config
 from .audio_capture import MicrophoneCapture
 from .audio_playback import AudioPlayback, PlaybackStats
-from .protocol import ProtocolError, parse_control_message, stream_end_message, stream_start_message
+from .protocol import (
+    ProtocolError,
+    parse_control_message,
+    robot_playback_started_message,
+    stream_end_message,
+    stream_start_message,
+)
 
 
 def _log(message: str) -> None:
     timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
     print(f"[{timestamp}] {message}", flush=True)
+
+
+def _client_log(event: str) -> None:
+    _log(f"[CLIENT] {event} mono={time.monotonic():.6f}")
 
 
 @dataclass
@@ -72,10 +82,19 @@ async def _send_user_stream(
     total_bytes = 0
     max_queue_depth = 0
     started = False
+    capture_stopped = False
     started_at = time.monotonic()
+
+    def stop_capture_once() -> None:
+        nonlocal capture_stopped
+        if not capture_stopped:
+            capture.stop()
+            capture_stopped = True
+            _client_log("user_capture_stop")
 
     try:
         capture.start()
+        _client_log("user_capture_start")
         await websocket.send(stream_start_message(stream_id, "user"))
         started = True
         started_at = time.monotonic()
@@ -101,7 +120,7 @@ async def _send_user_stream(
             frames_sent += 1
             total_bytes += len(frame)
 
-        capture.stop()
+        stop_capture_once()
         # Fixed-duration diagnostics preserve all frames captured before their
         # deadline. Natural conversation deliberately discards queued input as
         # soon as the robot starts replying.
@@ -117,7 +136,7 @@ async def _send_user_stream(
                 frames_sent += 1
                 total_bytes += len(frame)
     finally:
-        capture.stop()
+        stop_capture_once()
         elapsed = time.monotonic() - started_at
         if started:
             try:
@@ -173,7 +192,7 @@ async def _receive_robot_stream(
                 robot_frames = []
                 if on_stream_start is not None:
                     on_stream_start()
-                _log(f"robot_stream_start: {robot_stream_id}")
+                _client_log(f"robot_stream_start stream_id={robot_stream_id}")
                 continue
 
             if robot_stream_id is None or control["stream_id"] != robot_stream_id:
@@ -193,9 +212,35 @@ async def _receive_robot_stream(
             for frame in robot_frames:
                 playback.enqueue(frame)
 
-            _log(f"playback_start: {robot_stream_id}")
-            stats = await asyncio.to_thread(playback.finish)
-            _log(f"playback_end: {robot_stream_id}")
+            loop = asyncio.get_running_loop()
+            playback_started = asyncio.Event()
+
+            def mark_playback_started() -> None:
+                loop.call_soon_threadsafe(playback_started.set)
+
+            finish_task = asyncio.create_task(
+                asyncio.to_thread(playback.finish, mark_playback_started)
+            )
+            started_task = asyncio.create_task(playback_started.wait())
+            done, _ = await asyncio.wait(
+                {finish_task, started_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if started_task in done and playback_started.is_set():
+                _client_log(
+                    f"robot_playback_start stream_id={robot_stream_id}"
+                )
+                await websocket.send(
+                    robot_playback_started_message(robot_stream_id)
+                )
+            else:
+                await finish_task
+                raise RuntimeError("playback finished without starting")
+            stats = await finish_task
+            if not started_task.done():
+                started_task.cancel()
+            await asyncio.gather(started_task, return_exceptions=True)
+            _client_log(f"robot_playback_end stream_id={robot_stream_id}")
             result = RobotStreamResult(
                 stream_id=robot_stream_id,
                 frames_received=stats.received_frames,
@@ -297,6 +342,7 @@ async def run_conversation(
                     f"playback_underruns={robot.playback.underruns}"
                 )
                 _log("microphone_resume")
+                _client_log("next_turn_ready")
     finally:
         if websocket is not None:
             code = getattr(websocket, "close_code", None)

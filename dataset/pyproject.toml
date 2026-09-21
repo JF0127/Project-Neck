@@ -22,7 +22,7 @@ dependencies = [
 ]
 
 [tool.setuptools]
-packages = ["src", "src.crawler", "src.processing"]
+packages = ["src", "src.crawler", "src.processing", "src.tools"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

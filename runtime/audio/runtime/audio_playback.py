@@ -5,7 +5,7 @@ import shutil
 import subprocess
 import time
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from . import config
 
@@ -46,6 +46,7 @@ class AudioPlayback:
         self._started = False
         self._receiving = True
         self._silence = bytes(config.BYTES_PER_FRAME)
+        self._on_playback_start: Optional[Callable[[], None]] = None
 
     @staticmethod
     def _set_pulse_sink_port() -> None:
@@ -111,6 +112,9 @@ class AudioPlayback:
             return
         if self.first_playback_perf is None:
             self.first_playback_perf = time.perf_counter()
+            callback, self._on_playback_start = self._on_playback_start, None
+            if callback is not None:
+                callback()
         outdata[:] = frame
         self.played_frames += 1
 
@@ -135,7 +139,9 @@ class AudioPlayback:
             self._stream.start()
             self._started = True
 
-    def _finish_pulse(self) -> PlaybackStats:
+    def _finish_pulse(
+        self, on_playback_start: Optional[Callable[[], None]] = None
+    ) -> PlaybackStats:
         self._receiving = False
         pcm_frames: list[bytes] = []
         while True:
@@ -147,7 +153,6 @@ class AudioPlayback:
         if not pcm:
             return self.stats()
 
-        self.first_playback_perf = time.perf_counter()
         self._process = subprocess.Popen(
             [
                 "paplay",
@@ -162,6 +167,9 @@ class AudioPlayback:
             stderr=subprocess.PIPE,
         )
         process = self._process
+        self.first_playback_perf = time.perf_counter()
+        if on_playback_start is not None:
+            on_playback_start()
         _, stderr = process.communicate(input=pcm)
         self._process = None
         if process.returncode != 0:
@@ -172,11 +180,14 @@ class AudioPlayback:
         self.played_frames = self.received_frames
         return self.stats()
 
-    def finish(self) -> PlaybackStats:
+    def finish(
+        self, on_playback_start: Optional[Callable[[], None]] = None
+    ) -> PlaybackStats:
         """Play all queued frames, then stop and close the output device."""
         if config.LOCAL_AUDIO_BACKEND == "pulse":
-            return self._finish_pulse()
+            return self._finish_pulse(on_playback_start)
         self._receiving = False
+        self._on_playback_start = on_playback_start
         if self.received_frames and not self._started:
             self._start_stream()
 

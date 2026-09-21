@@ -54,6 +54,7 @@ class Runtime:
         turn_generator: TurnGenerator | None = None,
         neck_sender=None,
         motion_sync_offset_ms: int = 0,
+        motion_send_to_motor: bool = True,
     ) -> None:
         if cooldown_ms < 0:
             raise ValueError("cooldown_ms must be non-negative")
@@ -71,6 +72,7 @@ class Runtime:
         self.turn_generator = turn_generator
         self.neck_sender = neck_sender
         self.motion_sync_offset_ms = int(motion_sync_offset_ms)
+        self.motion_send_to_motor = bool(motion_send_to_motor)
 
         self.state = RuntimeState.LISTENING
         self.session: SessionContext | None = None
@@ -299,13 +301,16 @@ class Runtime:
         name = f"turn_{turn.turn_id}"
         request = self.create_motion_request()
         try:
-            generated = await asyncio.to_thread(
-                self.turn_generator.generate, request, name
+            generation = (
+                self.turn_generator.generate
+                if self.motion_send_to_motor
+                else self.turn_generator.generate_relative
             )
+            generated = await asyncio.to_thread(generation, request, name)
             return generated, used_fallback
         except PoseUnavailableError as exc:
             self.last_error = exc
-            print(f"[runtime][motion] audio only, pose unavailable: {exc}")
+            print(f"[MOTION] skipped: head_rpy invalid: {exc}")
             generated = await asyncio.to_thread(
                 self.turn_generator.generate_audio_only, request, name, str(exc)
             )
@@ -314,9 +319,16 @@ class Runtime:
             raise
         except Exception as exc:
             self.last_error = exc
+            reason = f"{type(exc).__name__}: {exc}"
+            if getattr(self.turn_generator.backend, "failure_mode", "") == "audio_only":
+                print(f"[MOTION] skipped: {reason}")
+                generated = await asyncio.to_thread(
+                    self.turn_generator.generate_audio_only, request, name, reason
+                )
+                return generated, used_fallback
             print(
                 "[runtime][motion] generation failed, default reply + shake: "
-                f"{type(exc).__name__}: {exc}"
+                f"{reason}"
             )
             fallback_text = DEFAULT_GENERATION_FALLBACK_TEXT
             fallback_speech = await self.tts.synthesize(fallback_text)
@@ -360,14 +372,12 @@ class Runtime:
         try:
             if generated.document is not None and self.neck_sender is not None:
                 if self.robot_state.motion_executing:
-                    print(
-                        "[runtime][motion] skipped: a neck trajectory is "
-                        "already executing"
-                    )
+                    print("[MOTION] skipped: a neck trajectory is already executing")
                 else:
                     if self.motion_sync_offset_ms > 0:
                         await asyncio.sleep(self.motion_sync_offset_ms / 1000.0)
                     try:
+                        print("[MOTION] send_start")
                         await asyncio.to_thread(
                             self.neck_sender.send, generated.document
                         )

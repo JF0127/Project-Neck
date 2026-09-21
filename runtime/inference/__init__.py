@@ -2,6 +2,7 @@
 
 from .artifacts import GenerationArtifacts, save_generation, write_wav_atomic
 from .base import MOTION_FPS, MotionBackend, validate_motion_output
+from .deepseek_motion import DeepSeekMotionBackend
 from .default_motion import DEFAULT_GENERATION_FALLBACK_TEXT, default_motion_output
 from .generator import GeneratedTurn, PoseUnavailableError, TurnGenerator
 from .motor_json import final_trajectory_to_motor_document
@@ -9,6 +10,7 @@ from .processor import MotionProcessor
 
 __all__ = [
     "DEFAULT_GENERATION_FALLBACK_TEXT",
+    "DeepSeekMotionBackend",
     "GenerationArtifacts",
     "GeneratedTurn",
     "MOTION_FPS",
