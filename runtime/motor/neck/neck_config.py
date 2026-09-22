@@ -22,9 +22,9 @@ motor1.current_param = 500
 # ==============================
 motor2.passage = 2
 motor2.id = 2
-motor2.min_position_deg = -250
-motor2.max_position_deg = -125
-motor2.center_position_deg = -210
+motor2.min_position_deg = 107
+motor2.max_position_deg = 234
+motor2.center_position_deg = 145
 motor2.max_velocity_deg_s = 25
 motor2.speed_param = 50
 motor2.current_param = 500

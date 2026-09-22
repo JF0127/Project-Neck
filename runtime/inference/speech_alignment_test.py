@@ -17,7 +17,8 @@ from ..contracts import (
     TurnContext,
 )
 from .deepseek_motion import DeepSeekMotionBackend
-from .motion_compiler import compile_motion_plan, parse_motion_plan
+from .motion_plan import MotionPlan
+from .trajectory_generator import TrajectoryGenerator
 from .speech_alignment import (
     SpeechAlignmentError,
     align_speech,
@@ -61,18 +62,22 @@ class _CaptureResponses:
 
     def create(self, **kwargs: object) -> SimpleNamespace:
         self.calls.append(dict(kwargs))
+        payload = json.loads(kwargs["input"][1]["content"])
         return SimpleNamespace(
             output_text=json.dumps(
                 {
-                    "actions": [
+                    "mode": "speaking",
+                    "duration_sec": payload["duration_sec"],
+                    "segments": [
                         {
-                            "start": 0.3,
-                            "end": 1.2,
-                            "roll": 0.0,
-                            "pitch": 2.0,
-                            "yaw": 0.0,
+                            "start_sec": 0.3,
+                            "end_sec": 1.2,
+                            "action": "nod",
+                            "primary_axis": "pitch",
+                            "amplitude_deg": 2.0,
+                            "reason": "test",
                         }
-                    ]
+                    ],
                 }
             )
         )
@@ -131,7 +136,7 @@ class SpeechAlignmentTest(unittest.TestCase):
         self.assertIsNotNone(result.fallback_reason)
         self.assertEqual(len(result.segments), 3)
 
-    def test_motion_payload_contains_segments_and_schema_is_unchanged(self) -> None:
+    def test_motion_payload_contains_prosody_and_motion_plan_v2(self) -> None:
         text = "好的，我们先确认这个方案，然后再继续。"
         speech = _example_speech(text)
         client = _CaptureClient()
@@ -154,33 +159,34 @@ class SpeechAlignmentTest(unittest.TestCase):
             self.assertEqual(payload["robot_text"], text)
             self.assertEqual(payload["duration_sec"], speech.duration_sec)
             self.assertEqual(len(payload["segments"]), 3)
-            artifact = json.loads(
-                Path(directory, "deepseek_motion_plan.json").read_text()
-            )
-            self.assertEqual(artifact["segments"], payload["segments"])
+            first_segment = payload["segments"][0]
             self.assertEqual(
-                artifact["alignment"]["method"], "pcm_pause_alignment"
+                set(first_segment), {"text", "start_sec", "end_sec", "prosody"}
             )
-            self.assertEqual(
-                set(artifact["actions"][0]),
-                {"start", "end", "roll", "pitch", "yaw"},
-            )
-            direct = compile_motion_plan(
-                parse_motion_plan(
+            self.assertIn("relative_energy", first_segment["prosody"])
+            self.assertIn("energy_peak_time_sec", first_segment["prosody"])
+            artifact = json.loads(Path(directory, "motion_plan.json").read_text())
+            self.assertEqual(artifact["mode"], "speaking")
+            self.assertEqual(artifact["segments"][0]["action"], "nod")
+            prosody = json.loads(Path(directory, "prosody.json").read_text())
+            self.assertEqual(prosody["alignment"]["method"], "pcm_pause_alignment")
+            direct = TrajectoryGenerator().generate(
+                MotionPlan.from_dict(
                     {
-                        "actions": [
+                        "mode": "speaking",
+                        "duration_sec": speech.duration_sec,
+                        "segments": [
                             {
-                                "start": 0.3,
-                                "end": 1.2,
-                                "roll": 0.0,
-                                "pitch": 2.0,
-                                "yaw": 0.0,
+                                "start_sec": 0.3,
+                                "end_sec": 1.2,
+                                "action": "nod",
+                                "primary_axis": "pitch",
+                                "amplitude_deg": 2.0,
+                                "reason": "test",
                             }
-                        ]
-                    },
-                    speech.duration_sec,
-                ),
-                speech.duration_sec,
+                        ],
+                    }
+                )
             )
             self.assertEqual(output, direct)
 
@@ -211,9 +217,7 @@ class SpeechAlignmentTest(unittest.TestCase):
             self.assertEqual(
                 set(payload), {"robot_text", "duration_sec"}
             )
-            artifact = json.loads(
-                Path(directory, "deepseek_motion_plan.json").read_text()
-            )
+            artifact = json.loads(Path(directory, "prosody.json").read_text())
             self.assertIsNone(artifact["segments"])
             self.assertEqual(
                 artifact["alignment"]["method"],

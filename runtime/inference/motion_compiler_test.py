@@ -1,22 +1,10 @@
 """Pure-software regression checks for DeepSeek gesture compilation."""
 from __future__ import annotations
 
-import json
 import math
-from pathlib import Path
-import tempfile
-from types import SimpleNamespace
 import unittest
 
-from ..contracts import (
-    MotionOutput,
-    MotionRequest,
-    RobotSpeech,
-    RobotState,
-    SessionContext,
-    TurnContext,
-)
-from .deepseek_motion import DeepSeekMotionBackend
+from ..contracts import MotionOutput
 from .motion_compiler import (
     _minimum_jerk,
     compile_motion_plan,
@@ -24,19 +12,11 @@ from .motion_compiler import (
 )
 from .motor_json import final_trajectory_to_motor_document
 from .processor import MotionProcessor
-
-
-class _Responses:
-    def __init__(self, plan: dict) -> None:
-        self.plan = plan
-
-    def create(self, **_: object) -> SimpleNamespace:
-        return SimpleNamespace(output_text=json.dumps(self.plan))
-
-
-class _Client:
-    def __init__(self, plan: dict) -> None:
-        self.responses = _Responses(plan)
+from .trajectory_optimizer import (
+    DEFAULT_MAX_ACCELERATION_DEG_S2,
+    DEFAULT_MAX_VELOCITY_DEG_S,
+    trajectory_metrics,
+)
 
 
 class GestureCompilerTest(unittest.TestCase):
@@ -110,30 +90,12 @@ class GestureCompilerTest(unittest.TestCase):
                 },
             ]
         }
-        with tempfile.TemporaryDirectory() as directory:
-            backend = DeepSeekMotionBackend(
-                output_dir=directory,
-                client=_Client(plan),
-            )
-            speech = RobotSpeech("测试动作。", b"\0\0" * 40000, (), 2.5)
-            request = MotionRequest.snapshot(
-                TurnContext(
-                    "test",
-                    robot_text=speech.text,
-                    robot_speech=speech,
-                ),
-                SessionContext("test"),
-                RobotState(),
-            )
-            output = backend.infer(request)
-            self.assertEqual(len(output.rpy_offset), 75)
-            artifact = json.loads(
-                Path(directory, "deepseek_motion_plan.json").read_text()
-            )
-            self.assertEqual(len(artifact["actions"]), 1)
-            self.assertEqual(len(artifact["rejected_actions"]), 1)
+        accepted, rejected = parse_motion_plan_with_rejections(plan, 2.5)
+        self.assertEqual(len(accepted), 1)
+        self.assertEqual(len(rejected), 1)
+        self.assertEqual(rejected[0].index, 1)
 
-    def test_motor_json_contract_and_minimum_jerk_tail(self) -> None:
+    def test_motor_json_contract_and_optimized_tail(self) -> None:
         final = MotionProcessor().process(self.output, [0.0, 0.0, 0.0])
         document = final_trajectory_to_motor_document(final, "gesture_test")
         self.assertEqual(
@@ -151,9 +113,21 @@ class GestureCompilerTest(unittest.TestCase):
         )
         tailed = MotionProcessor().process(nonneutral, [0.0, 0.0, 0.0])
         self.assertEqual(len(tailed.rpy), 26)
-        linear_first_tail = 0.1 * (1.0 - 1.0 / 24.0)
-        self.assertGreater(tailed.rpy[2][1], linear_first_tail)
+        self.assertEqual(
+            tailed.states,
+            ("speaking", "speaking") + ("silent",) * 24,
+        )
+        self.assertEqual(tailed.rpy[0], (0.0, 0.0, 0.0))
         self.assertEqual(tailed.rpy[-1], (0.0, 0.0, 0.0))
+        pitch_metrics = trajectory_metrics(tailed.rpy, 30.0)["pitch"]
+        self.assertLessEqual(
+            pitch_metrics["peak_velocity_deg_s"],
+            DEFAULT_MAX_VELOCITY_DEG_S + 1e-5,
+        )
+        self.assertLessEqual(
+            pitch_metrics["peak_acceleration_deg_s2"],
+            DEFAULT_MAX_ACCELERATION_DEG_S2 + 1e-4,
+        )
 
 
 if __name__ == "__main__":

@@ -10,7 +10,6 @@ from typing import Any
 
 from .contracts import RobotSpeech
 from .logging_utils import log
-from .runtime import Runtime
 from .tts import BYTES_PER_FRAME, iter_pcm_frames
 
 SAMPLE_RATE = 16_000
@@ -37,7 +36,7 @@ def _parse_control(message: str) -> dict:
 class AudioWebSocketServer:
     """Validate Audio transport and pass PCM frames to Runtime unchanged."""
 
-    def __init__(self, runtime: Runtime, host: str = "0.0.0.0", port: int = 8765):
+    def __init__(self, runtime: Any, host: str = "0.0.0.0", port: int = 8765):
         self.runtime = runtime
         self.host = host
         self.port = port

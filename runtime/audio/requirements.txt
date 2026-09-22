@@ -1,9 +1,4 @@
 sounddevice>=0.4.6,<1.0
 websockets>=12.0,<16.0
 qwen-asr[vllm]>=0.0.6; sys_platform == "linux"
-openai>=1.0,<3.0; sys_platform == "linux"
-PyYAML>=5.4; sys_platform == "linux"
-requests>=2.31,<3.0; sys_platform == "linux"
-edge-tts>=7.0; sys_platform == "linux"
-soundfile; sys_platform == "linux"
-scipy; sys_platform == "linux"
+librosa>=0.11; sys_platform == "linux"

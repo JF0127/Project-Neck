@@ -99,6 +99,11 @@ class TurnGenerator:
             raise PoseUnavailableError("measured head pose is not valid")
         output = self.backend.infer(request)
         final = self.processor.process(output, request.robot_state.head_rpy)
+        final_artifact_writer = getattr(
+            self.backend, "write_final_trajectory_artifact", None
+        )
+        if callable(final_artifact_writer):
+            final_artifact_writer(final)
         document = final_trajectory_to_motor_document(final, name)
         artifacts = self._save(speech, document, "model", name)
         return GeneratedTurn(speech, document, artifacts, "model")

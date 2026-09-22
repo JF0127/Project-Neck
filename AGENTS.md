@@ -25,9 +25,9 @@ tools/      项目级分析/可视化工具
 |---|---|
 | Dataset | Clean V2 首帧以最大人物锁定主主持人，后续用人脸 identity 逐帧跟踪；忽略画中画/附加窗口内的其他人物和脸。主主持人首次出现完整脸或脖子不可用时，保留此前有效前缀，删除失败帧及之后全部内容；仅第 0 帧失败等无有效前缀情况才淘汰。输出由模型自动分男女并按主播人脸 embedding 聚类 |
 | Algorithm | Baseline V1（audio+text → 30 fps `rpy_offset`）已实现；训练产物在 `algorithm/outputs/`（gitignored）。部署包 `runtime/models/baseline/{model.pt,vocab.json,config.yaml}`（TorchScript，gitignored） |
-| Runtime | 当前 Ubuntu 主链为 Silero VAD + Qwen3-ASR Streaming + DeepSeek 对话 + Doubao TTS；动作使用 DeepSeek sparse plan。默认 `motion.send_to_motor=false`，只生成 relative trajectory artifact，不启动反馈或连接 Motor；显式开启后才经 MotionProcessor 发送 Motor（见 §3） |
+| Runtime | 当前 Ubuntu 主链为 Silero VAD + Qwen3-ASR Streaming + DeepSeek 对话 + Doubao TTS；动作使用 DeepSeek MotionPlan V2。默认 `motion.send_to_motor=false`，只生成 relative trajectory artifact，不启动反馈或连接 Motor；显式开启后才经 MotionProcessor 发送 Motor（见 §3） |
 | Motor | SOEM EtherCAT 主站；三电机；`model` / `measurement` / `feedback` 三个 UDS；速度后处理。反馈需先手动归零（§4.4） |
-| Motion | 默认 `DeepSeekMotionBackend` 根据 robot text、TTS duration 和真实 PCM 的 phrase alignment 生成稀疏动作；`BaselineV1Backend` 与部署包仍保留用于 A/B，接口固定在 `runtime/inference/MotionBackend` |
+| Motion | 默认 `DeepSeekMotionBackend` 消费 robot text、TTS duration、PCM phrase alignment 与可解释 prosody，输出允许空 segments 的高层 `MotionPlan`；Validator 后由 Continuous Motion Generator V3 将 deterministic speaking base flow 与 `nod/turn/tilt/shake` 局部 modulation 合成为 30 fps relative RPY。Legacy sparse parser/compiler、`BaselineV1Backend` 与部署包均保留。完整 absolute trajectory 在 start continuity 与 neutral return 后统一经过未改默认行为的固定长度 `TrajectoryOptimizer` |
 
 仓库当前**没有自动化测试目录**（已按维护成本约定删除）；验证依靠运行命令、`ctest`（motor 保留原有 C++ 测试）和手动真机测试。
 
@@ -40,28 +40,32 @@ tools/      项目级分析/可视化工具
                      ┌────────────────────────────────────────────────┤
                      │  robot.wav / metadata.json                     │  PCM
                      ▼                                                ▼
-  PCM phrase alignment → DeepSeek sparse plan → deepseek_relative_trajectory.json
+  PCM phrase alignment → Prosody → DeepSeek MotionPlan V2 → Validator
+                     → Continuous Motion Generator V3 → raw_relative_trajectory.json
                      │                                                │
                      ├─ send_to_motor=false: 仅保存 relative artifact ─┤
                      │                                                │
-                     └─ send_to_motor=true: MotionProcessor → trajectory.json
-                                              → /tmp/neck_model.sock  │
+                     └─ send_to_motor=true: MotionProcessor → TrajectoryOptimizer
+                                              → trajectory.json → /tmp/neck_model.sock
                                                                       ▼
                                       robot 音频 → WebSocket 客户端播放
 
-`python -m runtime` 的 Whisper 路径仍保留；它与 Qwen 主链共用相同 Motion/Motor 构建和下游接口。默认 `send_to_motor=false` 时不创建 `NeckClient`、不启动 `MotorFeedbackMonitor`，DeepSeek Motion 仍正常调用且不依赖 measured RPY。
+`python -m runtime` 是唯一 production entry，直接构建本地 Qwen3-ASR vLLM streaming 主链；旧 Whisper/faster-whisper Runtime、wrapper、配置和模型已删除，不提供兼容 fallback。默认 `send_to_motor=false` 时不创建 `NeckClient`、不启动 `MotorFeedbackMonitor`，DeepSeek Motion 仍正常调用且不依赖 measured RPY。
 
 实时姿态（旁路，只读）:
   EtherCAT 反馈缓存 → FeedbackServer(30 Hz) → /tmp/neck_feedback.sock
     → MotorFeedbackMonitor → RobotState(head_rpy rad, valid, timestamp, motion_executing)
 ```
 
-- 产物目录（每轮覆盖）：`runtime/generated/{robot.wav, deepseek_motion_plan.json, deepseek_relative_trajectory.json, metadata.json}`；开启 Motor 发送时另写 `trajectory.json`。plan 保存原始响应、接受和丢弃的 actions、phrase segments 及 alignment metadata；relative trajectory 固定 30 fps、radian、`[roll,pitch,yaw]`，不经过 measured RPY 或 MotionProcessor。
-- Speech Alignment 在完整 TTS PCM 生成后执行：中文文本保守切为最多 4 个 phrase，优先使用 10 ms PCM RMS 检测到的真实停顿边界，其次使用局部低能量 valley；证据不足时显式标记 `proportional_fallback`，PCM 无效等失败则 DeepSeek Motion 回退到原 `text + duration` payload，不影响语音或该轮 Motion 请求。
-- DeepSeek action 是互不累计的 gesture amplitude：每个动作在自身区间按 40% minimum-jerk 上升、20% peak HOLD、40% minimum-jerk 回到 relative neutral；动作至少 0.7 s，动作间至少 0.2 s neutral HOLD。硬幅度限制仍为单轴 ±5°，prompt 通常限制 roll 1.5°、pitch/yaw 2.5°。局部非法 action 被丢弃而保留其他合法 gesture；最终无合法 action、API 或完整 JSON 失败时本轮 audio-only。MotionProcessor 的 24-frame neutral safety tail 同样使用 minimum-jerk。
-- DeepSeek Motion API/JSON/compiler/Motor/反馈失败均只跳过本轮动作，语音正常播放，不使用默认摇头；`head_rpy_valid == false` 同样只播音频。Baseline A/B 路径仍保留原 fallback。
+- 产物目录（每轮覆盖）：`runtime/generated/{robot.wav,prosody.json,deepseek_motion_plan_raw.json,motion_plan.json,raw_relative_trajectory.json,metadata.json}`；开启 Motor 发送时另写 `final_trajectory.json` 与 Motor 文档 `trajectory.json`。relative trajectory 固定 30 fps、radian、`[roll,pitch,yaw]`，不经过 measured RPY 或 MotionProcessor；final artifact 是经过 MotionProcessor/Optimizer 的 absolute RPY。
+- Speech Alignment 在完整 TTS PCM 生成后执行：中文文本保守切为最多 4 个 phrase，优先使用 10 ms PCM RMS 检测到的真实停顿边界，其次使用局部低能量 valley；证据不足时显式标记 `proportional_fallback`。Prosody V1 从 PCM/alignment 提取 segment duration、前后 pause、RMS mean/peak、句内 relative energy、energy peak time、字符语速和离散等级；当前无可靠 F0 依赖，artifact 明确记录该特征未提取。alignment/prosody 不可用时回退原 `text + duration` payload，不伪造音频特征。
+- MotionPlan V2 顶层固定为 `mode/duration_sec/segments`，segment 固定为 `start_sec/end_sec/action/primary_axis/amplitude_deg/reason`；空 segments 表示没有 semantic gesture，但 V3 仍生成轻微 speaking base flow。临时 action vocabulary 为 `nod→pitch`、`turn→yaw`、`tilt→roll`、`shake→yaw`。Validator 集中检查 schema、时长、动作—轴兼容、±5° 幅度及 overlap；任一非法 segment 令整份 plan 失败，不再局部接受。
+- Continuous Motion Generator V3 先用非等距 deterministic anchors 和 minimum-jerk transition 生成低幅度三轴 carrier，再将 nod/turn/tilt 的单轴 smooth excursion 与 shake 的 `0→+A→-0.8A→0` oscillation 作为局部 modulation 叠加；modulation 归零表示回到当时 carrier，不再回 motion-start zero。第一帧严格为 zero，最后一帧允许保持非零 speaking pose；默认 composed relative 单轴上限为 ±5°，越界时优先衰减 base contribution。旧 `motion_compiler.py` sparse action parser/compiler 保留供 legacy 回归和 V1 audit，不在默认 production path。
+- `TrajectoryOptimizer` 在完整 absolute RPY 上执行对称 `[1,4,6,4,1]/16` smoothing、position-domain 速度投影和迭代加速度投影；固定 30 fps、帧数、首末姿态和 states。默认参数仍为 1 pass、60 deg/s、500 deg/s²、最多 64 轮投影，不做 jerk limit 或语义优化。
+- DeepSeek Motion API、JSON、MotionPlan validation/generation、Motor 或反馈失败均只跳过本轮动作，语音正常播放，不使用默认摇头；`head_rpy_valid == false` 同样只播音频。Baseline A/B 路径仍保留原 fallback。
 - Qwen 主链等待 Audio Client 在实际启动本地播放时回传 `robot_playback_started`，随后发送轨迹；`motion.sync_offset_ms` 仅作为该事件之后的微调（当前为 0）。
 - 轨迹发送前会检查 `RobotState.motion_executing`，避免与正在执行的轨迹冲突。
+- `tools/motion_diversity_audit.py` 保留原 V1 审计与产物；`tools/motion_diversity_audit_v2.py` 对同一固定 16 句各生成一次真实 Doubao TTS，并复用 PCM/alignment/prosody 调用 V2 Planner 各 3 次，结果在 `runtime/experiments/motion_diversity_audit_v2/`。当前实测 48 次请求中 46 次完整成功，G2 的 run 1/3 因 action overlap 被 Validator 拒绝并保留 raw/error；完整比较见该目录 `report.md`。
 
 ## 4. 冻结接口
 
@@ -255,19 +259,21 @@ Project-Neck/
 │   ├── configs/baseline.yaml
 │   ├── data/ features.py models/ losses.py metrics.py train.py
 │   └── tests/                 # 已删除
-├── runtime/                   # 真机在线运行
-│   ├── __main__.py runtime.py contracts.py config.yaml
-│   ├── audio_server.py asr.py vad.py dialogue.py datetime_tool.py web_search.py tts.py doubao_tts.py logging_utils.py
+├── runtime/                   # 真机在线运行；唯一入口 python -m runtime
+│   ├── __main__.py qwen_streaming_runtime.py contracts.py config.yaml
+│   ├── audio_server.py vad.py dialogue.py datetime_tool.py web_search.py tts.py doubao_tts.py logging_utils.py
 │   ├── feedback.py            # 实时姿态 monitor
 │   ├── neck_client.py         # motor JSON 发送
 │   ├── inference/             # 模型 I/O 与产物（原 motion_core）
 │   │   ├── base.py processor.py baseline_v1.py deepseek_motion.py motion_compiler.py
+│   │   ├── motion_plan.py motion_plan_validator.py prosody.py speech_alignment.py
+│   │   ├── trajectory_generator.py trajectory_optimizer.py
 │   │   ├── motor_json.py default_motion.py generator.py artifacts.py
 │   ├── generated/             # 每轮生成的音频+轨迹（gitignored）
-│   ├── models/                # 部署资产：baseline/, whisper-large-v3-ct2, silero_vad（gitignored）
+│   ├── models/                # 部署资产：baseline/、silero_vad（Qwen 模型在 dataset/models/qwen）
 │   ├── audio/                 # macOS/Linux 音频客户端（采集/播放/WS）
 │   └── motor/                 # SOEM EtherCAT、三电机、三个 socket
-└── tools/trajectory_visualizer.py
+└── tools/                     # trajectory_visualizer.py、V1/V2 motion diversity audit
 ```
 
 ## 7. 常用命令
@@ -280,31 +286,25 @@ uv venv --python 3.10 runtime/.venv
 source runtime/.venv/bin/activate
 uv pip install --torch-backend=auto torch
 uv pip install -r runtime/requirements.txt
-uv pip install -r runtime/audio/requirements.txt
-# CTranslate2 需要 CUDA 12 的 cuBLAS/cuDNN（与 torch 的 CUDA 13 并存）：
-uv pip install "nvidia-cudnn-cu12==9.*" nvidia-cublas-cu12
-```
-
-`runtime/.venv/bin/activate` 末尾需追加（重建 venv 后要重新加，否则 large-v3 在 GPU 上会报 `libcublas.so.12` 找不到）：
-
-```bash
-if [ -n "${VIRTUAL_ENV:-}" ] && [ -d "$VIRTUAL_ENV/lib/python3.10/site-packages/nvidia/cublas/lib" ]; then
-    case ":${LD_LIBRARY_PATH:-}:" in
-        *":$VIRTUAL_ENV/lib/python3.10/site-packages/nvidia/cublas/lib:"*) ;;
-        *) export LD_LIBRARY_PATH="$VIRTUAL_ENV/lib/python3.10/site-packages/nvidia/cublas/lib:$VIRTUAL_ENV/lib/python3.10/site-packages/nvidia/cudnn/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ;;
-    esac
-fi
 ```
 
 ### 7.2 Runtime / Motor / Audio
 
 ```bash
-# Ubuntu：启动 runtime（需要 DEEPSEEK_API_KEY 环境变量）
+# Ubuntu production entry（唯一正式入口；需要 DeepSeek 与 Doubao key）
 source runtime/.venv/bin/activate
+export DEEPSEEK_API_KEY="<your-key>"
+export TAVILY_API_KEY="<your-key>"  # web_search 后端
+export VOLCENGINE_TTS_API_KEY="<your-key>"
+export VOLCENGINE_TTS_SPEAKER="zh_female_vv_uranus_bigtts"  # 可选
 python -m runtime
 
-# DeepSeek gesture compiler + TTS PCM alignment 纯软件回归测试（fake API，不连接 Motor）
-python -m unittest runtime.inference.motion_compiler_test runtime.inference.speech_alignment_test -v
+# MotionPlan V2 数据结构、prosody、validator、Continuous Generator V3、pipeline、legacy compiler 和 Optimizer 纯软件回归
+python -m unittest runtime.qwen_streaming_runtime_test runtime.inference.motion_plan_test runtime.inference.prosody_test runtime.inference.motion_plan_validator_test runtime.inference.trajectory_generator_test runtime.inference.deepseek_motion_test runtime.inference.motion_compiler_test runtime.inference.speech_alignment_test runtime.inference.trajectory_optimizer_test -v
+
+# V1 结果保留；V2 audit：真实 16 次 TTS + 48 次 DeepSeek Motion API，不连接硬件
+python tools/motion_diversity_audit_v2.py --phase collect --reset
+python tools/motion_diversity_audit_v2.py --phase analyze
 
 # Motor：只编译与软件测试（不要启动 executable，除非明确要做真机测试）
 cmake -S runtime/motor -B runtime/motor/build
@@ -322,16 +322,9 @@ python -m runtime.qwen_asr /path/to/audio.wav
 # 固定 WAV 的 vLLM streaming 诊断：转为 16 kHz mono float32，warmup 后按 100 ms 实时时序模拟输入
 python -m runtime.qwen_asr_streaming
 
-# Ubuntu：PCM → Silero VAD → Qwen3-ASR vLLM streaming → DeepSeek Responses → Doubao TTS V3；TTS 后生成 sparse Motion
-cd runtime/audio
-source .venv/bin/activate
-export DEEPSEEK_API_KEY="<your-key>"
-export TAVILY_API_KEY="<your-key>"  # web_search 后端
-export VOLCENGINE_TTS_API_KEY="<your-key>"
-export VOLCENGINE_TTS_SPEAKER="zh_female_vv_uranus_bigtts"  # 可选，未设置时即使用此默认值
-python tools/qwen_streaming_server.py
-# 每轮 Doubao TTS 完成后先原子覆盖保存 /home/jhl/projects/Project-Neck/tmp/robot.wav；默认只写 relative Motion artifact，send_to_motor=true 时才连接 Motor
-# 仅诊断 DeepSeek Responses event 时追加 --debug-deepseek-events
+# runtime/audio/tools/qwen_streaming_server.py 仅为兼容 debug helper，委托给同一 production entry，
+# 不再作为启动正式系统的命令。每轮产物写入 runtime/generated/；默认不连接 Motor。
+# DeepSeek event 诊断应回到仓库根目录执行：python -m runtime --debug-deepseek-events
 
 # Audio 客户端（Ubuntu 本机 PulseAudio/PipeWire；服务端需先运行）
 # 依赖 pactl/parec/paplay（Ubuntu 包通常为 pulseaudio-utils）
@@ -454,14 +447,13 @@ python -m algorithm.train --config algorithm/configs/baseline.yaml --epochs 50
 | 段 | 关键字段 |
 |---|---|
 | `vad` | `backend: silero`, `model_path`, `threshold`, `min_speech_ms`, `min_silence_ms` |
-| `asr` | `backend: whisper`, `model_path`（large-v3 CT2）, `device: cuda/cpu`, `language: zh` |
+| `asr` | `backend: qwen3_streaming`, 本地 `model_path`, `language: Chinese`, `chunk_size_sec`, `unfixed_chunk_num/unfixed_token_num`, vLLM 的 `gpu_memory_utilization/max_inference_batch_size/max_new_tokens` |
 | `dialogue` | `backend: deepseek`, `model`（当前 `deepseek-flash` / DeepSeek-V4.1-Flash，Responses API streaming，`max_output_tokens=4096`、`reasoning.effort=none`；纯当前日期时间强制使用 `zoneinfo.ZoneInfo("Asia/Shanghai")` 的本地 `get_current_datetime`（UTC+08:00，禁止搜索或由模型自行推算/转换），天气/新闻等实时互联网信息使用本地 `web_search`（含“今天/目前/当前/最近”时自动加入上海绝对日期，每轮最多 3 次），普通静态知识自动跳过工具；默认使用适合语音播放的自然口语，回复尽量控制在 30 个汉字以内（含标点），仅在无法完整回答时才允许略微超过）, `base_url`, `timeout_sec`, `temperature` |
-| `tts` | `backend: doubao`（默认，V3 HTTP Chunked、`seed-tts-2.0`、16 kHz mono PCM；speaker 来自 `VOLCENGINE_TTS_SPEAKER`，默认 `zh_female_vv_uranus_bigtts`）；可切回 `edge` 并使用 `voice` |
+| `tts` | production 固定 `backend: doubao`（V3 HTTP Chunked、`seed-tts-2.0`、16 kHz mono PCM；speaker 来自 `VOLCENGINE_TTS_SPEAKER`，默认 `zh_female_vv_uranus_bigtts`） |
 | `motion` | `enabled`, `backend: deepseek/baseline`（默认 deepseek），`send_to_motor`（默认 false；false 时只生成 relative artifact且不启动反馈/Socket），DeepSeek 的 `deepseek_model/deepseek_timeout_sec/deepseek_temperature/deepseek_max_output_tokens`，Baseline 的 `model_path/vocab_path/device`，以及 `generated_dir/sync_offset_ms` |
 | `motor` | `feedback_enabled`, `feedback_socket`, `feedback_stale_sec`, `send_enabled`, `socket_path`, `measurement_socket`, `mock` |
-| `runtime` | `dialogue_fallback_text`, `cooldown_ms` |
 
-`runtime/motor/neck/neck_config.py`（motor 唯一硬件配置）：`network_interface`、`slave_id`、三电机 `passage/id/min/max/center/max_velocity/speed_param/current_param`、RPY 范围、运动学 `c11/c12/c21/c22/k3`、`feedback.enabled/socket_path/rate_hz`。当前电机绝对角度 `[min,center,max]` 分别为 M1 `[-84,7,41]°`、M2 `[-250,-210,-125]°`、M3 `[57,147,238]°`；Pitch 为 `[-45,40]°`，Roll 为 `[-40,40]°`，Yaw 保持 `[-117,58]°`。**不得为了让测试通过而修改标定/限位/电流/速度。**
+`runtime/motor/neck/neck_config.py`（motor 唯一硬件配置）：`network_interface`、`slave_id`、三电机 `passage/id/min/max/center/max_velocity/speed_param/current_param`、RPY 范围、运动学 `c11/c12/c21/c22/k3`、`feedback.enabled/socket_path/rate_hz`。当前电机绝对角度 `[min,center,max]` 分别为 M1 `[-84,7,41]°`、M2 `[107,145,234]°`、M3 `[57,147,238]°`；Pitch 为 `[-45,40]°`，Roll 为 `[-40,40]°`，Yaw 保持 `[-117,58]°`。**不得为了让测试通过而修改标定/限位/电流/速度。**
 
 ## 9. 硬件与安全铁律
 

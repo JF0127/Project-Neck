@@ -6,6 +6,7 @@ from typing import Sequence
 
 from ..contracts import FinalTrajectory, MotionOutput
 from .base import MOTION_FPS, validate_motion_output
+from .trajectory_optimizer import TrajectoryOptimizer
 
 NEUTRAL_RPY = (0.0, 0.0, 0.0)
 _VALID_STATES = {"speaking", "listening", "silent"}
@@ -37,25 +38,28 @@ def _interpolate(
 
 
 class MotionProcessor:
-    """Convert offsets to absolute RPY and add simple endpoint transitions.
+    """Convert offsets to absolute RPY and optimize the complete trajectory.
 
-    This first version deliberately does not smooth or apply hardware limits.
-    It starts at the supplied measured pose, linearly reaches the backend's
-    first absolute target, preserves all later model frames, and linearly
-    returns to the kinematic neutral pose ``[0, 0, 0]``.
+    It starts at the supplied measured pose, reaches the backend's first
+    absolute target, preserves all later model frames, returns to the kinematic
+    neutral pose ``[0, 0, 0]``, then applies fixed-length kinematic optimization.
     """
 
     def __init__(
         self,
         start_transition_frames: int = 3,
         neutral_return_frames: int = 24,
+        optimizer: TrajectoryOptimizer | None = None,
     ) -> None:
         if start_transition_frames < 1:
             raise ValueError("start_transition_frames must be at least 1")
         if neutral_return_frames < 1:
             raise ValueError("neutral_return_frames must be at least 1")
+        if optimizer is not None and not isinstance(optimizer, TrajectoryOptimizer):
+            raise TypeError("optimizer must be a TrajectoryOptimizer")
         self.start_transition_frames = start_transition_frames
         self.neutral_return_frames = neutral_return_frames
+        self.optimizer = optimizer or TrajectoryOptimizer()
 
     @staticmethod
     def offset_to_absolute(
@@ -95,11 +99,12 @@ class MotionProcessor:
                 )
                 states.append("silent")
 
+        optimized = self.optimizer.optimize(trajectory, MOTION_FPS)
         result = FinalTrajectory(
-            rpy=tuple(trajectory),
+            rpy=optimized,
             fps=MOTION_FPS,
             states=tuple(states),
-            duration_sec=len(trajectory) / MOTION_FPS,
+            duration_sec=len(optimized) / MOTION_FPS,
         )
         self.validate_final(result)
         return result

@@ -8,10 +8,15 @@ vad:
   min_speech_ms: 250
   min_silence_ms: 500
 asr:
-  backend: whisper
-  model_path: models/whisper-large-v3-ct2
-  device: cuda
-  language: zh
+  backend: qwen3_streaming
+  model_path: ../dataset/models/qwen
+  language: Chinese
+  chunk_size_sec: 1.0
+  unfixed_chunk_num: 4
+  unfixed_token_num: 5
+  gpu_memory_utilization: 0.7
+  max_inference_batch_size: 1
+  max_new_tokens: 4096
 dialogue:
   backend: deepseek
   model: deepseek-flash
@@ -20,10 +25,6 @@ dialogue:
   temperature: 0.7
 tts:
   backend: doubao
-  voice: zh-CN-XiaoxiaoNeural  # Edge fallback
-runtime:
-  dialogue_fallback_text: "抱歉，我刚才没有处理好，请再说一次。"
-  cooldown_ms: 200
 motion:
   enabled: true
   backend: deepseek
@@ -45,4 +46,3 @@ motor:
   socket_path: /tmp/neck_model.sock
   measurement_socket: /tmp/neck_measurement.sock
   mock: false
-recorder: {}
