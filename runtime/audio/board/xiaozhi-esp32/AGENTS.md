@@ -23,6 +23,7 @@ Microphone → Opus → XiaoZhi Cloud ASR / LLM / TTS → Opus → Speaker
 3. `robot_text`
 4. `robot_audio`
 5. 用于分段的 `robot_audio_end` control event
+6. `robot_playback_start` / `robot_playback_end` / `robot_playback_abort`
 
 **BoardBridge 是旁路，不是 XiaoZhi 主链路。** Ubuntu 断线、处理过慢或旁路 queue overflow 时，必须优先丢弃旁路音频，不得反向阻塞或破坏原有 ASR、LLM、TTS、Speaker 行为。
 
@@ -48,9 +49,9 @@ Microphone → Opus → XiaoZhi Cloud ASR / LLM / TTS → Opus → Speaker
 
 - Xmini C3：Wi-Fi client，同时作为 BoardBridge TCP client。
 - Ubuntu：BoardBridge TCP server。
-- 当前开发部署地址在 `main/boards/xmini/c3/board_bridge.cc` 中为 `192.168.110.234:8766`。
+- 当前开发部署地址集中定义在 `main/boards/xmini/c3/config.h`，当前值为 `192.168.110.234:8766`。
 - IP 是 deployment-specific 配置，不是永久协议字段；更换 Ubuntu 主机或网络时需要更新。
-- TCP port 和 framing semantics 属于 Frozen V1 Contract。
+- TCP port 和 framing semantics 属于 Frozen V2 Contract。
 
 BoardBridge sender 只能在网络栈初始化后启动。当前正确生命周期是：
 
@@ -126,7 +127,7 @@ state == "sentence_start"
 Wire format：UTF-8 NDJSON。
 
 ```json
-{"type":"robot_text","text":"你好呀。"}
+{"type":"robot_text","turn_id":12,"timestamp_ms":123456,"text":"你好呀。"}
 ```
 
 ### `user_audio`
@@ -172,13 +173,16 @@ Binary frame：
 
 | Offset | Size | Field |
 |---:|---:|---|
-| 0 | 1 | type = `0x02` |
+| 0 | 1 | type = `0x03` |
 | 1 | 4 | sequence, uint32 big-endian |
 | 5 | 4 | payload_length, uint32 big-endian |
-| 9 | 4 | sample_rate, uint32 big-endian |
-| 13 | 2 | frame_duration_ms, uint16 big-endian |
-| 15 | 1 | channels |
-| 16 | N | raw Opus payload |
+| 9 | 4 | turn_id, uint32 big-endian |
+| 13 | 4 | sample_rate, uint32 big-endian |
+| 17 | 2 | frame_duration_ms, uint16 big-endian |
+| 19 | 1 | channels |
+| 20 | N | raw Opus payload |
+
+Ubuntu parser 继续接受 Frozen V1 的 `0x02` / 16-byte legacy robot audio frame；ESP32 sender 只发送带 `turn_id` 的 `0x03` 新帧。
 
 `AudioStreamPacket` 本身没有 channels 字段。V1 使用 channels=1，依据是 XiaoZhi hello 声明 mono，且 `AudioService` 下行 Opus decoder 明确配置为 mono。
 
@@ -196,10 +200,23 @@ state == "stop"
 Wire format：UTF-8 NDJSON control event。
 
 ```json
-{"type":"robot_audio_end"}
+{"type":"robot_audio_end","turn_id":12,"timestamp_ms":125000}
 ```
 
 它表示当前 robot TTS audio phase 结束。不要使用 `robot_text` 作为 audio end：`sentence_start` 之后 robot audio 可以继续数秒。
+
+### Robot playback lifecycle
+
+`turn_id` 只在 `tts.state == "start"` 时递增；同一轮多个 `sentence_start`、所有 robot audio 及终止事件使用同一个 ID。
+
+```json
+{"type":"robot_first_audio","turn_id":12,"timestamp_ms":123500}
+{"type":"robot_playback_start","turn_id":12,"timestamp_ms":123456}
+{"type":"robot_playback_end","turn_id":12,"timestamp_ms":125678}
+{"type":"robot_playback_abort","turn_id":12,"timestamp_ms":124000,"reason":"wake_word_detected"}
+```
+
+`timestamp_ms` 来自 ESP32 monotonic timer。`robot_text` 在 Application 处理 `sentence_start` 时记录；`robot_first_audio` 在首个正常 Robot TTS Opus 进入 Application 时记录且每 turn 最多一次；`robot_playback_start` 在首个带该 `turn_id` 的 PCM frame 提交给 codec 前触发；正常 `robot_playback_end` 要求已经收到 TTS stop，且 decode/playback queue 与 decode/output in-flight 全部清空。临时 underrun不会结束 turn。系统 popup、alert、notify 等本地音效没有 `robot_turn_id`，不会产生这些事件。`robot_audio_end` 始终只是 TTS stream end，不等同于 playback end。
 
 ### TCP stream framing
 
@@ -208,7 +225,8 @@ Parser 根据下一 frame 的首字节分流：
 ```text
 0x7B "{" → NDJSON，读取到 '\n'
 0x01     → user_audio，读取 9-byte header，再读取 payload_length bytes
-0x02     → robot_audio，读取 16-byte header，再读取 payload_length bytes
+0x02     → legacy robot_audio，读取 16-byte header，再读取 payload_length bytes
+0x03     → robot_audio V2，读取 20-byte header，再读取 payload_length bytes
 ```
 
 TCP 是 stream，不保留应用消息边界。实现必须正确支持：
@@ -405,7 +423,7 @@ Consumer 不得假设所有 turn 都完整正常；必须检查 `completed_by`�
 
 它不是正式 Runtime IPC，也不得成为 Algorithm/Audio/Motor 模块间的数据总线。
 
-未来 Algorithm Runtime 正式接管 BoardBridge server 时，应优先复用 Frozen V1 wire contract，并在 Ubuntu 侧替换或抽取 handler；不要为了 Runtime 接入随意修改 ESP32 sender。
+未来 Algorithm Runtime 正式接管 BoardBridge server 时，应优先复用 Frozen V2 wire contract，并在 Ubuntu 侧替换或抽取 handler；不要为了 Runtime 接入随意修改 ESP32 sender。
 
 ## Build
 
@@ -465,7 +483,7 @@ source ~/esp/esp-idf/export.sh
 idf.py -p /dev/ttyACM0 monitor --no-reset
 ```
 
-## Frozen V1 Contract
+## Frozen V2 Contract
 
 以下接口已经冻结，原则上不要随意修改：
 
@@ -473,8 +491,9 @@ idf.py -p /dev/ttyACM0 monitor --no-reset
 - `user_text` JSON type/semantics
 - `robot_text` JSON type/semantics
 - `user_audio` type `0x01` header
-- `robot_audio` type `0x02` header
+- `robot_audio` type `0x03` / 20-byte header；Ubuntu parser兼容接收 legacy `0x02`
 - `robot_audio_end` NDJSON control event
+- 单轮 `turn_id` 与 robot playback lifecycle events
 - `user_audio = raw Opus / 16 kHz / mono / 60 ms`
 - Robot audio format metadata随每个 frame 携带
 - User/robot 独立 uint32 sequence及 mirror-attempt-before-drop 语义
@@ -483,7 +502,7 @@ idf.py -p /dev/ttyACM0 monitor --no-reset
 
 Ubuntu IP 是 deployment-specific，不属于冻结协议字段。
 
-确需改变 Frozen V1 Contract 时，必须同步：
+确需改变 Frozen V2 Contract 时，必须同步：
 
 1. 修改 ESP32 sender；
 2. 修改 Ubuntu parser/recorder；

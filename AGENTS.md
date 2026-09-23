@@ -33,6 +33,14 @@ tools/      项目级分析/可视化工具
 
 ## 3. Runtime 链路
 
+### XiaoZhi + Global Motion V1（独立运行模式）
+
+`python -m runtime --xiaozhi` 在 Ubuntu 直接监听 `0.0.0.0:8766`，接收 ESP32-C3 经 Wi-Fi 主动建立的 BoardBridge TCP 混合流；USB 不参与正式数据链。不能同时启动占用该端口的 `tools/board_bridge_server.py`。两者共用 `runtime/audio/board/xiaozhi-esp32/tools/board_bridge_protocol.py` 的增量解析器；小智固件、Cloud 和 wire protocol 不变。`runtime/xiaozhi_adapter.py` 将首个 user audio/user text、robot text、first audio、playback start/end/abort 映射为 `silent/listening/thinking/speaking`；`robot_audio` 仍解析但不参与动作。以 `% ` 开头的工具文本被标为 non-spoken 并忽略。板卡断线时服务继续等待重连，Global Motion 不停止。
+
+`runtime/global_motion.py` 是不调用 LLM 的连续周期 baseline RPY 采样器：三轴共用持续递增的 phase；yaw/pitch/roll 幅度 4.5/2.5/1.2°，相位 0/+50/−70°，各叠加 0.12/0.10/0.10 比例的二次谐波并归一化。基础周期 8 秒，周期时长、幅度和谐波比例每周期只变化 ±6%，跨周期以 quintic smoothstep 平滑参数；状态幅度/速度在 1.5 秒内平滑过渡，不重置 phase。参数集中在 `runtime/config.yaml` 的 `global_motion`。`runtime/xiaozhi_motion_runtime.py` 以 30 fps 持续采样；真机模式按 1 秒绝对轨迹块调用现有 `TrajectoryOptimizer`、`final_trajectory_to_motor_document`、`NeckClient` 和 Motor socket，不经过会追加 neutral return 的旧 `MotionProcessor`。`thinking` 在 Motor 文档的有限状态集合中映射为 `silent`，生成器内部仍保留 thinking 风格。Motor 不支持预排队且没有应用层 ACK，发送器根据反馈 `motion_executing` 等待前一块结束；Motor 结束一块后停止位置帧，姿态反馈可能变 invalid，续块使用已确认执行的上一块终点。块间可能短暂持位。反馈服务断线时暂停 Motor 发送，采样器仍运行；首次发送要求有效姿态且各轴距零不超过 5°，否则等待手动归零。当前没有 DeepSeek Semantic Motion；未来在 baseline `sample()` 后加 semantic offset，再做安全处理。
+
+纯软件运行：`runtime/.venv/bin/python -m runtime --xiaozhi --dry-run --duration 60 --output /tmp/project-neck-global-motion-cyclic-60s.csv`，打印帧数、范围、峰值速度/加速度、周期数/时长、分块边界误差与状态切换，保存含 `cycle_index` 的 CSV，不接 Motor。真机运行：`runtime/.venv/bin/python -m runtime --xiaozhi`，须先启动 Motor 并按 §4.4 手动归零。旧 `python -m runtime` 入口保留。
+
 ```text
 当前 Qwen Streaming 生成 + 执行（每轮）:
   user PCM ─→ Silero VAD ─→ Qwen3-ASR Streaming ─→ DeepSeek ─→ Doubao TTS V3
@@ -456,7 +464,7 @@ python -m algorithm.train --config algorithm/configs/baseline.yaml --epochs 50
 | `motion` | `enabled`, `backend: deepseek/baseline`（默认 deepseek），`send_to_motor`（默认 false；false 时只生成 relative artifact且不启动反馈/Socket），DeepSeek 的 `deepseek_model/deepseek_timeout_sec/deepseek_temperature/deepseek_max_output_tokens`，Baseline 的 `model_path/vocab_path/device`，以及 `generated_dir/sync_offset_ms` |
 | `motor` | `feedback_enabled`, `feedback_socket`, `feedback_stale_sec`, `send_enabled`, `socket_path`, `measurement_socket`, `mock` |
 
-`runtime/motor/neck/neck_config.py`（motor 唯一硬件配置）：`network_interface`、`slave_id`、三电机 `passage/id/min/max/center/max_velocity/speed_param/current_param`、RPY 范围、运动学 `c11/c12/c21/c22/k3`、`feedback.enabled/socket_path/rate_hz`。当前电机绝对角度 `[min,center,max]` 分别为 M1 `[-84,-7,41]°`（down=-84、top=41）、M2 `[-250,-200,-125]°`（top=-250、down=-125；center=-200 沿用现有配置，尚待实测确认）、M3 `[-302,-200,-120]°`（right=-302、middle=-200、left=-120）；min/max 为数值上下限，不表示 top/down 或 left/right。Pitch 为 `[-45,40]°`，Roll 为 `[-40,40]°`，Yaw 保持 `[-117,58]°`。**不得为了让测试通过而修改标定/限位/电流/速度。**
+`runtime/motor/neck/neck_config.py`（motor 唯一硬件配置）：`network_interface`、`slave_id`、三电机 `passage/id/min/max/center/max_velocity/speed_param/current_param`、RPY 范围、运动学 `c11/c12/c21/c22/k3`、`feedback.enabled/socket_path/rate_hz`。当前电机绝对角度 `[min,center,max]` 分别为 M1 `[-84,-7,41]°`（down=-84、top=41）、M2 `[108,160,234]°`（top=108、down=234、middle=160）、M3 `[57,153,238]°`（right=57、middle=153、left=238）；min/max 为数值上下限，不表示 top/down 或 left/right。Pitch 为 `[-45,40]°`，Roll 为 `[-40,40]°`，Yaw 保持 `[-117,58]°`。**不得为了让测试通过而修改标定/限位/电流/速度。**
 
 ## 9. 硬件与安全铁律
 

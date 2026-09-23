@@ -22,11 +22,11 @@ motor1.current_param = 500
 # ==============================
 motor2.passage = 2
 motor2.id = 2
-# Top: -250 deg; down: -125 deg. min/max are numerical bounds,
-# not the top/down labels. Center -200 is provisional pending calibration.
-motor2.min_position_deg = -250
-motor2.max_position_deg = -125
-motor2.center_position_deg = -200
+# Top: 108 deg; down: 234 deg; middle: 160 deg.
+# min/max are numerical bounds, not the top/down labels.
+motor2.min_position_deg = 108
+motor2.max_position_deg = 234
+motor2.center_position_deg = 160
 motor2.max_velocity_deg_s = 25
 motor2.speed_param = 50
 motor2.current_param = 500
@@ -36,10 +36,10 @@ motor2.current_param = 500
 # ==============================
 motor3.passage = 3
 motor3.id = 3
-# Right: -302 deg; left: -120 deg; middle: -200 deg.
-motor3.min_position_deg = -302
-motor3.max_position_deg = -120
-motor3.center_position_deg = -200
+# Right: 57 deg; left: 238 deg; middle: 153 deg.
+motor3.min_position_deg = 57
+motor3.max_position_deg = 238
+motor3.center_position_deg = 153
 motor3.max_velocity_deg_s = 30
 motor3.speed_param = 50
 motor3.current_param = 500

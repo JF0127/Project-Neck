@@ -88,6 +88,28 @@ void Application::Initialize() {
     callbacks.on_playback_progress = [this](uint32_t playback_id, uint32_t media_position_ms) {
         notify_player_.OnPlaybackProgress(playback_id, media_position_ms);
     };
+    callbacks.on_robot_playback_start = [this](uint32_t turn_id, uint64_t timestamp_ms) {
+        if (robot_playback_start_callback_) {
+            robot_playback_start_callback_(turn_id, timestamp_ms);
+        }
+    };
+    callbacks.on_robot_playback_end = [this](uint32_t turn_id, uint64_t timestamp_ms) {
+        if (current_robot_turn_id_.load() == turn_id) {
+            robot_turn_active_.store(false);
+        }
+        if (robot_playback_end_callback_) {
+            robot_playback_end_callback_(turn_id, timestamp_ms);
+        }
+    };
+    callbacks.on_robot_playback_abort =
+        [this](uint32_t turn_id, uint64_t timestamp_ms, const std::string& reason) {
+            if (current_robot_turn_id_.load() == turn_id) {
+                robot_turn_active_.store(false);
+            }
+            if (robot_playback_abort_callback_) {
+                robot_playback_abort_callback_(turn_id, timestamp_ms, reason);
+            }
+        };
     audio_service_.SetCallbacks(callbacks);
 
     // Add state change listeners
@@ -545,6 +567,13 @@ void Application::InitializeProtocol() {
 
     protocol_->OnIncomingAudio([this](std::unique_ptr<AudioStreamPacket> packet) {
         if (GetDeviceState() == kDeviceStateSpeaking) {
+            packet->robot_turn_id = current_robot_turn_id_.load();
+            if (packet->robot_turn_id != 0 && !robot_first_audio_seen_.exchange(true)) {
+                uint64_t timestamp_ms = static_cast<uint64_t>(esp_timer_get_time() / 1000);
+                if (robot_first_audio_callback_) {
+                    robot_first_audio_callback_(packet->robot_turn_id, timestamp_ms);
+                }
+            }
             if (robot_audio_callback_) {
                 robot_audio_callback_(*packet);
             }
@@ -564,6 +593,10 @@ void Application::InitializeProtocol() {
 
     protocol_->OnAudioChannelClosed([this, &board]() {
         board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
+        uint32_t turn_id = current_robot_turn_id_.load();
+        if (robot_turn_active_.load() && turn_id != 0) {
+            audio_service_.AbortRobotPlayback(turn_id, "audio_channel_closed");
+        }
         Schedule([this]() {
             auto display = Board::GetInstance().GetDisplay();
             display->SetChatMessage("system", "");
@@ -617,14 +650,31 @@ void Application::InitializeProtocol() {
                 return;
             }
             if (strcmp(state->valuestring, "start") == 0) {
+                uint32_t previous_turn_id = current_robot_turn_id_.load();
+                if (robot_turn_active_.load() && previous_turn_id != 0) {
+                    audio_service_.AbortRobotPlayback(previous_turn_id, "state_change");
+                }
+                uint32_t turn_id = current_robot_turn_id_.fetch_add(1) + 1;
+                if (turn_id == 0) {
+                    turn_id = 1;
+                    current_robot_turn_id_.store(turn_id);
+                }
+                robot_turn_active_.store(true);
+                robot_first_audio_seen_.store(false);
+                audio_service_.BeginRobotTurn(turn_id);
+                ESP_LOGI(TAG, "[BRIDGE] robot turn start id=%lu",
+                         static_cast<unsigned long>(turn_id));
                 Schedule([this]() {
                     aborted_ = false;
                     SetDeviceState(kDeviceStateSpeaking);
                 });
             } else if (strcmp(state->valuestring, "stop") == 0) {
+                uint32_t turn_id = current_robot_turn_id_.load();
+                uint64_t timestamp_ms = static_cast<uint64_t>(esp_timer_get_time() / 1000);
                 if (robot_audio_end_callback_) {
-                    robot_audio_end_callback_();
+                    robot_audio_end_callback_(turn_id, timestamp_ms);
                 }
+                audio_service_.MarkRobotTtsStreamEnded(turn_id);
                 Schedule([this]() {
                     if (GetDeviceState() == kDeviceStateSpeaking) {
                         if (listening_mode_ == kListeningModeManualStop) {
@@ -638,8 +688,10 @@ void Application::InitializeProtocol() {
                 auto text = cJSON_GetObjectItem(root, "text");
                 if (cJSON_IsString(text)) {
                     std::string message(text->valuestring);
+                    uint32_t turn_id = current_robot_turn_id_.load();
+                    uint64_t timestamp_ms = static_cast<uint64_t>(esp_timer_get_time() / 1000);
                     if (robot_text_callback_) {
-                        robot_text_callback_(message);
+                        robot_text_callback_(turn_id, timestamp_ms, message);
                     }
                     std::vector<TextGlyph> glyphs;
                     uint8_t bpp = 0;
@@ -1170,6 +1222,12 @@ void Application::Schedule(std::function<void()>&& callback) {
 void Application::AbortSpeaking(AbortReason reason) {
     ESP_LOGI(TAG, "Abort speaking");
     aborted_ = true;
+    uint32_t turn_id = current_robot_turn_id_.load();
+    if (robot_turn_active_.load() && turn_id != 0) {
+        const char* bridge_reason =
+            reason == kAbortReasonWakeWordDetected ? "wake_word_detected" : "user_interrupt";
+        audio_service_.AbortRobotPlayback(turn_id, bridge_reason);
+    }
     if (protocol_) {
         protocol_->SendAbortSpeaking(reason);
     }
@@ -1317,7 +1375,8 @@ void Application::RegisterUserTextCallback(std::function<void(const std::string&
     user_text_callback_ = std::move(callback);
 }
 
-void Application::RegisterRobotTextCallback(std::function<void(const std::string&)> callback) {
+void Application::RegisterRobotTextCallback(
+    std::function<void(uint32_t turn_id, uint64_t timestamp_ms, const std::string&)> callback) {
     robot_text_callback_ = std::move(callback);
 }
 
@@ -1331,8 +1390,30 @@ void Application::RegisterRobotAudioCallback(
     robot_audio_callback_ = std::move(callback);
 }
 
-void Application::RegisterRobotAudioEndCallback(std::function<void()> callback) {
+void Application::RegisterRobotFirstAudioCallback(
+    std::function<void(uint32_t turn_id, uint64_t timestamp_ms)> callback) {
+    robot_first_audio_callback_ = std::move(callback);
+}
+
+void Application::RegisterRobotAudioEndCallback(
+    std::function<void(uint32_t turn_id, uint64_t timestamp_ms)> callback) {
     robot_audio_end_callback_ = std::move(callback);
+}
+
+void Application::RegisterRobotPlaybackStartCallback(
+    std::function<void(uint32_t turn_id, uint64_t timestamp_ms)> callback) {
+    robot_playback_start_callback_ = std::move(callback);
+}
+
+void Application::RegisterRobotPlaybackEndCallback(
+    std::function<void(uint32_t turn_id, uint64_t timestamp_ms)> callback) {
+    robot_playback_end_callback_ = std::move(callback);
+}
+
+void Application::RegisterRobotPlaybackAbortCallback(
+    std::function<void(uint32_t turn_id, uint64_t timestamp_ms, const std::string& reason)>
+        callback) {
+    robot_playback_abort_callback_ = std::move(callback);
 }
 
 void Application::SendMcpMessage(const std::string& payload) {

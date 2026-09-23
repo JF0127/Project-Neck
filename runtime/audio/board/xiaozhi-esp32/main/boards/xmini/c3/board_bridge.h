@@ -17,20 +17,31 @@ public:
 
     void Start();
     bool EnqueueUserText(const std::string& text);
-    bool EnqueueRobotText(const std::string& text);
+    bool EnqueueRobotText(uint32_t turn_id, uint64_t timestamp_ms, const std::string& text);
     bool EnqueueUserAudio(const AudioStreamPacket& packet);
     bool EnqueueRobotAudio(const AudioStreamPacket& packet);
-    bool EnqueueRobotAudioEnd();
+    bool EnqueueRobotFirstAudio(uint32_t turn_id, uint64_t timestamp_ms);
+    bool EnqueueRobotAudioEnd(uint32_t turn_id, uint64_t timestamp_ms);
+    bool EnqueueRobotPlaybackStart(uint32_t turn_id, uint64_t timestamp_ms);
+    bool EnqueueRobotPlaybackEnd(uint32_t turn_id, uint64_t timestamp_ms);
+    bool EnqueueRobotPlaybackAbort(uint32_t turn_id, uint64_t timestamp_ms,
+                                   const std::string& reason);
 
 private:
     enum class MessageType {
         UserText,
         RobotText,
+        RobotFirstAudio,
         RobotAudioEnd,
+        RobotPlaybackStart,
+        RobotPlaybackEnd,
+        RobotPlaybackAbort,
     };
 
     struct Message {
         MessageType type;
+        uint32_t turn_id;
+        uint64_t timestamp_ms;
         std::string text;
     };
 
@@ -41,6 +52,7 @@ private:
 
     struct RobotAudioMessage {
         uint32_t sequence;
+        uint32_t turn_id;
         uint32_t sample_rate;
         uint16_t frame_duration_ms;
         uint8_t channels;
@@ -53,7 +65,8 @@ private:
 
     static void SenderTaskEntry(void* arg);
     void SenderTask();
-    bool EnqueueText(MessageType type, const std::string& text);
+    bool EnqueueText(MessageType type, uint32_t turn_id, uint64_t timestamp_ms,
+                     const std::string& text);
     void ClearUserAudioQueue();
     void ClearRobotAudioQueue();
 

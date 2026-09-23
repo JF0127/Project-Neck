@@ -83,6 +83,10 @@ struct AudioServiceCallbacks {
     // Fired when the decode/playback queues and their in-flight work are drained.
     std::function<void(void)> on_playback_drained;
     std::function<void(uint32_t playback_id, uint32_t media_position_ms)> on_playback_progress;
+    std::function<void(uint32_t turn_id, uint64_t timestamp_ms)> on_robot_playback_start;
+    std::function<void(uint32_t turn_id, uint64_t timestamp_ms)> on_robot_playback_end;
+    std::function<void(uint32_t turn_id, uint64_t timestamp_ms, const std::string& reason)>
+        on_robot_playback_abort;
 };
 
 
@@ -98,6 +102,7 @@ struct AudioTask {
     uint32_t timestamp = 0;
     uint32_t playback_id = 0;
     uint32_t media_position_ms = 0;
+    uint32_t robot_turn_id = 0;
 };
 
 struct DebugStatistics {
@@ -131,6 +136,9 @@ public:
     void EnableVoiceProcessing(bool enable);
     void EnableAudioTesting(bool enable);
     void EnableDeviceAec(bool enable);
+    void BeginRobotTurn(uint32_t turn_id);
+    void MarkRobotTtsStreamEnded(uint32_t turn_id);
+    void AbortRobotPlayback(uint32_t turn_id, const std::string& reason);
 
     void SetCallbacks(AudioServiceCallbacks& callbacks);
 
@@ -182,6 +190,10 @@ private:
     bool output_in_flight_ = false;
     bool playback_drained_notified_ = true;
     uint32_t playback_generation_ = 0;
+    uint32_t robot_playback_turn_id_ = 0;
+    bool robot_playback_started_ = false;
+    bool robot_tts_stream_ended_ = false;
+    bool robot_playback_terminal_notified_ = false;
     // For server AEC
     std::deque<uint32_t> timestamp_queue_;
 
@@ -208,6 +220,7 @@ private:
     void CheckAndUpdateAudioPowerState();
     bool IsPlaybackDrainedLocked() const;
     bool MarkPlaybackDrainedLocked();
+    bool MarkRobotPlaybackEndedLocked(uint32_t& turn_id, uint64_t& timestamp_ms);
 };
 
 #endif

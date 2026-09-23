@@ -7,6 +7,7 @@
 #include <esp_timer.h>
 
 #include <string>
+#include <atomic>
 #include <mutex>
 #include <deque>
 #include <memory>
@@ -115,10 +116,21 @@ public:
     void SendMcpMessage(const std::string& payload);
     void RegisterMcpBroadcastCallback(std::function<void(const std::string&)> callback);
     void RegisterUserTextCallback(std::function<void(const std::string&)> callback);
-    void RegisterRobotTextCallback(std::function<void(const std::string&)> callback);
+    void RegisterRobotTextCallback(
+        std::function<void(uint32_t turn_id, uint64_t timestamp_ms, const std::string&)> callback);
     void RegisterUserAudioCallback(std::function<void(const AudioStreamPacket&)> callback);
     void RegisterRobotAudioCallback(std::function<void(const AudioStreamPacket&)> callback);
-    void RegisterRobotAudioEndCallback(std::function<void()> callback);
+    void RegisterRobotFirstAudioCallback(
+        std::function<void(uint32_t turn_id, uint64_t timestamp_ms)> callback);
+    void RegisterRobotAudioEndCallback(
+        std::function<void(uint32_t turn_id, uint64_t timestamp_ms)> callback);
+    void RegisterRobotPlaybackStartCallback(
+        std::function<void(uint32_t turn_id, uint64_t timestamp_ms)> callback);
+    void RegisterRobotPlaybackEndCallback(
+        std::function<void(uint32_t turn_id, uint64_t timestamp_ms)> callback);
+    void RegisterRobotPlaybackAbortCallback(
+        std::function<void(uint32_t turn_id, uint64_t timestamp_ms, const std::string& reason)>
+            callback);
     void SetAecMode(AecMode mode);
     AecMode GetAecMode() const { return aec_mode_; }
     void PlaySound(const std::string_view& sound);
@@ -151,10 +163,18 @@ private:
 
     std::function<void(const std::string&)> mcp_broadcast_callback_;
     std::function<void(const std::string&)> user_text_callback_;
-    std::function<void(const std::string&)> robot_text_callback_;
+    std::function<void(uint32_t, uint64_t, const std::string&)> robot_text_callback_;
     std::function<void(const AudioStreamPacket&)> user_audio_callback_;
     std::function<void(const AudioStreamPacket&)> robot_audio_callback_;
-    std::function<void()> robot_audio_end_callback_;
+    std::function<void(uint32_t, uint64_t)> robot_first_audio_callback_;
+    std::function<void(uint32_t, uint64_t)> robot_audio_end_callback_;
+    std::function<void(uint32_t, uint64_t)> robot_playback_start_callback_;
+    std::function<void(uint32_t, uint64_t)> robot_playback_end_callback_;
+    std::function<void(uint32_t, uint64_t, const std::string&)> robot_playback_abort_callback_;
+
+    std::atomic<uint32_t> current_robot_turn_id_{0};
+    std::atomic<bool> robot_turn_active_{false};
+    std::atomic<bool> robot_first_audio_seen_{false};
 
     bool has_server_time_ = false;
     bool aborted_ = false;

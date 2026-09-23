@@ -14,12 +14,15 @@ import wave
 from datetime import datetime
 from pathlib import Path
 
+from board_bridge_protocol import BoardBridgeParser, ProtocolError
+
 
 HOST = "0.0.0.0"
 PORT = 8766
 RECV_SIZE = 4096
 USER_AUDIO_HEADER_SIZE = 9
-ROBOT_AUDIO_HEADER_SIZE = 16
+LEGACY_ROBOT_AUDIO_HEADER_SIZE = 16
+ROBOT_AUDIO_V2_HEADER_SIZE = 20
 MAX_AUDIO_PAYLOAD = 8192
 SAMPLE_RATE = 16000
 CHANNELS = 1
@@ -28,10 +31,6 @@ FRAME_DURATION_MS = 60
 FINISH_FLUSH_SECONDS = 0.3
 SOCKET_POLL_SECONDS = 0.1
 DEFAULT_OUTPUT_DIR = Path("artifacts/board_bridge")
-
-
-class ProtocolError(Exception):
-    pass
 
 
 class OpusDecodeError(Exception):
@@ -117,6 +116,81 @@ class OpusDecoder:
             self.decoder = None
 
 
+class EventProfiler:
+    PROFILE_FIELDS = (
+        "robot_text_rx",
+        "first_audio_rx",
+        "first_audio_packet_rx",
+        "playback_start_rx",
+        "audio_end_rx",
+        "playback_end_rx",
+    )
+
+    def __init__(self):
+        self.events = {}
+        self.board_events_ms = {}
+
+    def record(self, turn_id, event_name, host_rx_mono=None, first_only=False):
+        if host_rx_mono is None:
+            host_rx_mono = time.monotonic()
+        if turn_id is None:
+            return host_rx_mono, False
+        turn_events = self.events.setdefault(turn_id, {})
+        if first_only and event_name in turn_events:
+            return host_rx_mono, False
+        turn_events[event_name] = host_rx_mono
+        return host_rx_mono, True
+
+    def record_board(self, turn_id, event_name, timestamp_ms, first_only=False):
+        if turn_id is None or timestamp_ms is None:
+            return False
+        turn_events = self.board_events_ms.setdefault(turn_id, {})
+        if first_only and event_name in turn_events:
+            return False
+        turn_events[event_name] = timestamp_ms
+        return True
+
+    @staticmethod
+    def _duration(events, start, end):
+        if start not in events or end not in events:
+            return None
+        return events[end] - events[start]
+
+    def print_summary(self, turn_id):
+        if turn_id is None:
+            return
+        events = self.events.get(turn_id, {})
+        values = " ".join(
+            f"{name}={events[name]:.6f}" if name in events else f"{name}=NA"
+            for name in self.PROFILE_FIELDS
+        )
+        print(f"[TURN {turn_id}] profile {values}", flush=True)
+        board_events = self.board_events_ms.get(turn_id, {})
+        metrics = {
+            "text_to_first_audio_ms": self._duration(
+                board_events, "robot_text", "first_audio"
+            ),
+            "text_to_playback_start_ms": self._duration(
+                board_events, "robot_text", "playback_start"
+            ),
+            "first_audio_to_playback_start_ms": self._duration(
+                board_events, "first_audio", "playback_start"
+            ),
+            "playback_duration_ms": self._duration(
+                board_events, "playback_start", "playback_end"
+            ),
+        }
+        metric_values = " ".join(
+            f"{name}={value}" if value is not None else f"{name}=NA"
+            for name, value in metrics.items()
+        )
+        print(f"[TURN {turn_id}] board_profile {metric_values}", flush=True)
+
+
+def turn_label(turn_id):
+    return str(turn_id) if turn_id is not None else "?"
+
+
 class SessionOutput:
     def __init__(self, output_dir):
         base_dir = Path(output_dir)
@@ -147,7 +221,7 @@ class RobotAudioStats:
         self.audio_format = None
 
     def handle_robot_audio(
-        self, sequence, payload, sample_rate, frame_duration_ms, channels
+        self, turn_id, sequence, payload, sample_rate, frame_duration_ms, channels
     ):
         if self.last_sequence is not None:
             expected = (self.last_sequence + 1) & 0xFFFFFFFF
@@ -173,9 +247,9 @@ class RobotAudioStats:
         self.received_packets += 1
         self.audio_bytes += len(payload)
 
-        if self.received_packets == 1 or self.received_packets % 20 == 0:
+        if self.received_packets % 20 == 0:
             print(
-                f"[{timestamp()}] robot_audio: packets={self.received_packets} "
+                f"[TURN {turn_label(turn_id)}] robot_audio: packets={self.received_packets} "
                 f"bytes={self.audio_bytes} last_seq={sequence} "
                 f"rate={sample_rate}Hz frame={frame_duration_ms}ms ch={channels}",
                 flush=True,
@@ -217,6 +291,7 @@ class TurnRecorder:
         self.robot_wav = None
         self.user_text = None
         self.robot_text_sentences = []
+        self.robot_turn_id = None
         self.user_state = self.IDLE
         self.robot_state = self.IDLE
         self.user_finish_deadline = None
@@ -323,13 +398,26 @@ class TurnRecorder:
         self.user_finish_deadline = None
         print(f"User turn {self.turn_id:03d} user audio phase finalized", flush=True)
 
-    def handle_robot_text(self, text):
+    def _track_robot_turn(self, turn_id):
+        if turn_id is None:
+            return
+        if self.robot_turn_id is None:
+            self.robot_turn_id = turn_id
+        elif self.robot_turn_id != turn_id:
+            print(
+                f"[{timestamp()}] warning: robot turn changed inside recorder: "
+                f"{self.robot_turn_id} -> {turn_id}",
+                flush=True,
+            )
+
+    def handle_robot_text(self, turn_id, text):
         self.check_deadlines()
         if not self.record:
             return
         if not self.active:
             print(f"[{timestamp()}] warning: robot_text received without active turn", flush=True)
             return
+        self._track_robot_turn(turn_id)
         self.robot_text_sentences.append(text)
 
     def _start_robot_audio(self, sample_rate, frame_duration_ms, channels):
@@ -346,13 +434,17 @@ class TurnRecorder:
         self.robot_state = self.RECORDING
         return True
 
-    def handle_robot_audio(self, sequence, payload, sample_rate, frame_duration_ms, channels):
+    def handle_robot_audio(
+        self, turn_id, sequence, payload, sample_rate, frame_duration_ms, channels
+    ):
         self.check_deadlines()
         if not self.record:
             return
         if not self.active:
             print(f"[{timestamp()}] warning: robot_audio received without active turn", flush=True)
             return
+
+        self._track_robot_turn(turn_id)
 
         self._update_stats(self.robot_stats, "robot_audio", sequence, len(payload))
         packet_count = self.robot_stats["received_packets"]
@@ -370,9 +462,9 @@ class TurnRecorder:
             )
             return
 
-        if packet_count == 1 or packet_count % 20 == 0:
+        if packet_count % 20 == 0:
             print(
-                f"[{timestamp()}] robot_audio: packets={packet_count} "
+                f"[TURN {turn_label(turn_id)}] robot_audio: packets={packet_count} "
                 f"bytes={self.robot_stats['audio_bytes']} last_seq={sequence} "
                 f"rate={sample_rate}Hz frame={frame_duration_ms}ms ch={channels}",
                 flush=True,
@@ -388,13 +480,14 @@ class TurnRecorder:
         self.robot_stats["decoded_packets"] += 1
         self.robot_stats["samples"] += sample_count
 
-    def handle_robot_audio_end(self):
+    def handle_robot_audio_end(self, turn_id):
         self.check_deadlines()
         if not self.record:
             return
         if not self.active:
             print(f"[{timestamp()}] warning: robot_audio_end received without active turn", flush=True)
             return
+        self._track_robot_turn(turn_id)
         if self.robot_state == self.FINISHING:
             print(f"[{timestamp()}] warning: duplicate robot_audio_end ignored", flush=True)
             return
@@ -451,6 +544,7 @@ class TurnRecorder:
             robot_duration = robot_audio["duration_seconds"]
         metadata = {
             "turn_id": self.turn_id,
+            "robot_turn_id": self.robot_turn_id,
             "user_text": self.user_text,
             "user_audio": self._audio_metadata(
                 self.user_stats, SAMPLE_RATE, FRAME_DURATION_MS, CHANNELS
@@ -487,7 +581,21 @@ def timestamp():
     return datetime.now().strftime("%H:%M:%S.%f")[:-3]
 
 
-def handle_text_message(line, turn_recorder):
+def message_turn_id(message):
+    turn_id = message.get("turn_id")
+    if isinstance(turn_id, bool) or not isinstance(turn_id, int) or turn_id < 0:
+        return None
+    return turn_id
+
+
+def message_timestamp_ms(message):
+    timestamp_ms = message.get("timestamp_ms")
+    if isinstance(timestamp_ms, bool) or not isinstance(timestamp_ms, int) or timestamp_ms < 0:
+        return None
+    return timestamp_ms
+
+
+def handle_text_message(line, turn_recorder, profiler):
     try:
         message = json.loads(line)
     except (json.JSONDecodeError, UnicodeDecodeError):
@@ -499,24 +607,94 @@ def handle_text_message(line, turn_recorder):
         text = message.get("text", "")
         if not isinstance(text, str):
             text = str(text)
-        print(f"[{timestamp()}] user_text: {text}", flush=True)
+        host_rx_mono = time.monotonic()
+        print(
+            f"[{timestamp()}] user_text: {text} host_rx_mono={host_rx_mono:.6f}",
+            flush=True,
+        )
         turn_recorder.handle_user_text(text)
     elif isinstance(message, dict) and message.get("type") == "robot_text":
+        turn_id = message_turn_id(message)
+        board_timestamp_ms = message_timestamp_ms(message)
         text = message.get("text", "")
         if not isinstance(text, str):
             text = str(text)
-        print(f"[{timestamp()}] robot_text: {text}", flush=True)
-        turn_recorder.handle_robot_text(text)
+        host_rx_mono, _ = profiler.record(
+            turn_id, "robot_text_rx", first_only=True
+        )
+        profiler.record_board(
+            turn_id, "robot_text", board_timestamp_ms, first_only=True
+        )
+        print(
+            f"[TURN {turn_label(turn_id)}] robot_text: {text} "
+            f"board_ts={board_timestamp_ms} host_rx_mono={host_rx_mono:.6f}",
+            flush=True,
+        )
+        turn_recorder.handle_robot_text(turn_id, text)
+    elif isinstance(message, dict) and message.get("type") == "robot_first_audio":
+        turn_id = message_turn_id(message)
+        board_timestamp_ms = message_timestamp_ms(message)
+        host_rx_mono, _ = profiler.record(
+            turn_id, "first_audio_rx", first_only=True
+        )
+        profiler.record_board(
+            turn_id, "first_audio", board_timestamp_ms, first_only=True
+        )
+        print(
+            f"[TURN {turn_label(turn_id)}] robot_first_audio "
+            f"board_ts={board_timestamp_ms} host_rx_mono={host_rx_mono:.6f}",
+            flush=True,
+        )
     elif isinstance(message, dict) and message.get("type") == "robot_audio_end":
-        print(f"[{timestamp()}] robot_audio_end", flush=True)
-        turn_recorder.handle_robot_audio_end()
+        turn_id = message_turn_id(message)
+        board_timestamp_ms = message_timestamp_ms(message)
+        host_rx_mono, _ = profiler.record(turn_id, "audio_end_rx")
+        profiler.record_board(turn_id, "audio_end", board_timestamp_ms)
+        print(
+            f"[TURN {turn_label(turn_id)}] tts_stream_end "
+            f"board_ts={board_timestamp_ms} host_rx_mono={host_rx_mono:.6f}",
+            flush=True,
+        )
+        turn_recorder.handle_robot_audio_end(turn_id)
+    elif isinstance(message, dict) and message.get("type") == "robot_playback_start":
+        turn_id = message_turn_id(message)
+        board_timestamp_ms = message_timestamp_ms(message)
+        host_rx_mono, _ = profiler.record(turn_id, "playback_start_rx")
+        profiler.record_board(turn_id, "playback_start", board_timestamp_ms)
+        print(
+            f"[TURN {turn_label(turn_id)}] playback_start "
+            f"board_ts={board_timestamp_ms} host_rx_mono={host_rx_mono:.6f}",
+            flush=True,
+        )
+    elif isinstance(message, dict) and message.get("type") == "robot_playback_end":
+        turn_id = message_turn_id(message)
+        board_timestamp_ms = message_timestamp_ms(message)
+        host_rx_mono, _ = profiler.record(turn_id, "playback_end_rx")
+        profiler.record_board(turn_id, "playback_end", board_timestamp_ms)
+        print(
+            f"[TURN {turn_label(turn_id)}] playback_end "
+            f"board_ts={board_timestamp_ms} host_rx_mono={host_rx_mono:.6f}",
+            flush=True,
+        )
+        profiler.print_summary(turn_id)
+    elif isinstance(message, dict) and message.get("type") == "robot_playback_abort":
+        turn_id = message_turn_id(message)
+        board_timestamp_ms = message_timestamp_ms(message)
+        reason = message.get("reason", "")
+        host_rx_mono, _ = profiler.record(turn_id, "playback_abort_rx")
+        print(
+            f"[TURN {turn_label(turn_id)}] playback_abort reason={reason} "
+            f"board_ts={board_timestamp_ms} host_rx_mono={host_rx_mono:.6f}",
+            flush=True,
+        )
+        profiler.print_summary(turn_id)
     else:
         content = json.dumps(message, ensure_ascii=False)
         print(f"[{timestamp()}] unknown: {content}", flush=True)
 
 
-def receive_client(client, turn_recorder, robot_audio_stats):
-    buffer = bytearray()
+def receive_client(client, turn_recorder, robot_audio_stats, profiler):
+    parser = BoardBridgeParser()
     client.settimeout(SOCKET_POLL_SECONDS)
 
     while True:
@@ -527,71 +705,33 @@ def receive_client(client, turn_recorder, robot_audio_stats):
             continue
         if not data:
             return
-        buffer.extend(data)
         turn_recorder.check_deadlines()
-
-        while buffer:
-            frame_type = buffer[0]
-
-            if frame_type == ord("\n"):
-                del buffer[0]
-                continue
-            if frame_type == ord("\r"):
-                if len(buffer) < 2:
-                    break
-                if buffer[1] == ord("\n"):
-                    del buffer[:2]
-                    continue
-                raise ProtocolError("unexpected carriage return")
-
-            if frame_type == ord("{"):
-                newline = buffer.find(b"\n")
-                if newline < 0:
-                    break
-                line = bytes(buffer[:newline])
-                del buffer[: newline + 1]
-                if line.strip():
-                    handle_text_message(line, turn_recorder)
-                continue
-
-            if frame_type == 0x01:
-                if len(buffer) < USER_AUDIO_HEADER_SIZE:
-                    break
-                sequence, payload_length = struct.unpack_from("!II", buffer, 1)
-                if payload_length == 0 or payload_length > MAX_AUDIO_PAYLOAD:
-                    raise ProtocolError(f"invalid user_audio length: {payload_length}")
-                frame_length = USER_AUDIO_HEADER_SIZE + payload_length
-                if len(buffer) < frame_length:
-                    break
-                payload = bytes(buffer[USER_AUDIO_HEADER_SIZE:frame_length])
-                del buffer[:frame_length]
+        for event in parser.feed(data):
+            if event[0] == "message":
+                handle_text_message(json.dumps(event[1], ensure_ascii=False).encode("utf-8"), turn_recorder, profiler)
+            elif event[0] == "user_audio":
+                _, sequence, payload = event
                 turn_recorder.handle_user_audio(sequence, payload)
-                continue
-
-            if frame_type == 0x02:
-                if len(buffer) < ROBOT_AUDIO_HEADER_SIZE:
-                    break
-                sequence, payload_length, sample_rate, frame_duration_ms, channels = (
-                    struct.unpack_from("!IIIHB", buffer, 1)
+            elif event[0] == "robot_audio":
+                _, turn_id, sequence, payload, sample_rate, frame_duration_ms, channels = event
+                host_rx_mono, is_first = profiler.record(
+                    turn_id, "first_audio_packet_rx", first_only=True
                 )
-                if payload_length == 0 or payload_length > MAX_AUDIO_PAYLOAD:
-                    raise ProtocolError(f"invalid robot_audio length: {payload_length}")
-                if sample_rate == 0 or frame_duration_ms == 0 or channels == 0:
-                    raise ProtocolError(
-                        "invalid robot_audio format: "
-                        f"rate={sample_rate} frame={frame_duration_ms} channels={channels}"
+                if is_first:
+                    print(
+                        f"[TURN {turn_label(turn_id)}] first_robot_audio "
+                        f"sr={sample_rate} frame={frame_duration_ms}ms "
+                        f"host_rx_mono={host_rx_mono:.6f}",
+                        flush=True,
                     )
-                frame_length = ROBOT_AUDIO_HEADER_SIZE + payload_length
-                if len(buffer) < frame_length:
-                    break
-                payload = bytes(buffer[ROBOT_AUDIO_HEADER_SIZE:frame_length])
-                del buffer[:frame_length]
                 robot_audio_stats.handle_robot_audio(
-                    sequence, payload, sample_rate, frame_duration_ms, channels
+                    turn_id,
+                    sequence,
+                    payload,
+                    sample_rate,
+                    frame_duration_ms,
+                    channels,
                 )
-                continue
-
-            raise ProtocolError(f"unknown frame type: 0x{frame_type:02x}")
 
 
 def parse_args():
@@ -657,10 +797,11 @@ def main():
                     args.record_turns, session_output, args.debug_audio
                 )
                 robot_audio_stats = turn_recorder if args.record_turns else RobotAudioStats()
+                profiler = EventProfiler()
                 completed_by = "disconnect"
                 try:
                     with client:
-                        receive_client(client, turn_recorder, robot_audio_stats)
+                        receive_client(client, turn_recorder, robot_audio_stats, profiler)
                 except ProtocolError as error:
                     print(f"[{timestamp()}] protocol error: {error}", flush=True)
                 except KeyboardInterrupt:

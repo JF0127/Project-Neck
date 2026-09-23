@@ -119,6 +119,53 @@ void AudioService::Initialize(AudioCodec* codec) {
     esp_timer_create(&audio_power_timer_args, &audio_power_timer_);
 }
 
+void AudioService::BeginRobotTurn(uint32_t turn_id) {
+    if (turn_id == 0) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+    robot_playback_turn_id_ = turn_id;
+    robot_playback_started_ = false;
+    robot_tts_stream_ended_ = false;
+    robot_playback_terminal_notified_ = false;
+}
+
+void AudioService::MarkRobotTtsStreamEnded(uint32_t turn_id) {
+    uint32_t ended_turn_id = 0;
+    uint64_t timestamp_ms = 0;
+    bool notify_end = false;
+    {
+        std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+        if (turn_id == 0 || turn_id != robot_playback_turn_id_ ||
+            robot_playback_terminal_notified_) {
+            return;
+        }
+        robot_tts_stream_ended_ = true;
+        notify_end = MarkRobotPlaybackEndedLocked(ended_turn_id, timestamp_ms);
+    }
+    if (notify_end && callbacks_.on_robot_playback_end) {
+        callbacks_.on_robot_playback_end(ended_turn_id, timestamp_ms);
+    }
+}
+
+void AudioService::AbortRobotPlayback(uint32_t turn_id, const std::string& reason) {
+    uint64_t timestamp_ms = 0;
+    bool notify_abort = false;
+    {
+        std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+        if (turn_id == 0 || turn_id != robot_playback_turn_id_ ||
+            robot_playback_terminal_notified_) {
+            return;
+        }
+        robot_playback_terminal_notified_ = true;
+        timestamp_ms = static_cast<uint64_t>(esp_timer_get_time() / 1000);
+        notify_abort = true;
+    }
+    if (notify_abort && callbacks_.on_robot_playback_abort) {
+        callbacks_.on_robot_playback_abort(turn_id, timestamp_ms, reason);
+    }
+}
+
 void AudioService::Start() {
     service_stopped_.store(false);
     xEventGroupClearBits(event_group_, AS_EVENT_AUDIO_TESTING_RUNNING | AS_EVENT_WAKE_WORD_RUNNING |
@@ -337,6 +384,21 @@ void AudioService::AudioOutputTask() {
             callbacks_.on_playback_progress(task->playback_id, task->media_position_ms);
         }
 
+        bool notify_robot_start = false;
+        uint64_t robot_start_timestamp_ms = 0;
+        if (task->robot_turn_id != 0) {
+            std::lock_guard<std::mutex> queue_lock(audio_queue_mutex_);
+            if (task->robot_turn_id == robot_playback_turn_id_ && !robot_playback_started_ &&
+                !robot_playback_terminal_notified_) {
+                robot_playback_started_ = true;
+                robot_start_timestamp_ms = static_cast<uint64_t>(esp_timer_get_time() / 1000);
+                notify_robot_start = true;
+            }
+        }
+        if (notify_robot_start && callbacks_.on_robot_playback_start) {
+            callbacks_.on_robot_playback_start(task->robot_turn_id, robot_start_timestamp_ms);
+        }
+
         codec_->OutputData(task->pcm);
 
         /* Update the last output time */
@@ -344,6 +406,9 @@ void AudioService::AudioOutputTask() {
         debug_statistics_.playback_count++;
 
         bool notify_drained = false;
+        bool notify_robot_end = false;
+        uint32_t ended_robot_turn_id = 0;
+        uint64_t robot_end_timestamp_ms = 0;
         lock.lock();
 #if CONFIG_USE_SERVER_AEC
         /* Record the timestamp for server AEC */
@@ -353,11 +418,15 @@ void AudioService::AudioOutputTask() {
 #endif
         output_in_flight_ = false;
         notify_drained = MarkPlaybackDrainedLocked();
+        notify_robot_end = MarkRobotPlaybackEndedLocked(ended_robot_turn_id, robot_end_timestamp_ms);
         audio_queue_cv_.notify_all();
         lock.unlock();
 
         if (notify_drained && callbacks_.on_playback_drained) {
             callbacks_.on_playback_drained();
+        }
+        if (notify_robot_end && callbacks_.on_robot_playback_end) {
+            callbacks_.on_robot_playback_end(ended_robot_turn_id, robot_end_timestamp_ms);
         }
     }
 
@@ -390,6 +459,7 @@ void AudioService::OpusCodecTask() {
             task->timestamp = packet->timestamp;
             task->playback_id = packet->playback_id;
             task->media_position_ms = packet->media_position_ms;
+            task->robot_turn_id = packet->robot_turn_id;
 
             SetDecodeSampleRate(packet->sample_rate, packet->frame_duration);
             bool decoded = false;
@@ -437,10 +507,17 @@ void AudioService::OpusCodecTask() {
             decode_in_flight_ = false;
             debug_statistics_.decode_count++;
             const bool notify_drained = MarkPlaybackDrainedLocked();
+            uint32_t ended_robot_turn_id = 0;
+            uint64_t robot_end_timestamp_ms = 0;
+            const bool notify_robot_end =
+                MarkRobotPlaybackEndedLocked(ended_robot_turn_id, robot_end_timestamp_ms);
             audio_queue_cv_.notify_all();
             lock.unlock();
             if (notify_drained && callbacks_.on_playback_drained) {
                 callbacks_.on_playback_drained();
+            }
+            if (notify_robot_end && callbacks_.on_robot_playback_end) {
+                callbacks_.on_robot_playback_end(ended_robot_turn_id, robot_end_timestamp_ms);
             }
             lock.lock();
         }
@@ -805,6 +882,18 @@ bool AudioService::MarkPlaybackDrainedLocked() {
         return false;
     }
     playback_drained_notified_ = true;
+    return true;
+}
+
+bool AudioService::MarkRobotPlaybackEndedLocked(uint32_t& turn_id, uint64_t& timestamp_ms) {
+    if (robot_playback_turn_id_ == 0 || !robot_tts_stream_ended_ ||
+        robot_playback_terminal_notified_ ||
+        !IsPlaybackDrainedLocked()) {
+        return false;
+    }
+    robot_playback_terminal_notified_ = true;
+    turn_id = robot_playback_turn_id_;
+    timestamp_ms = static_cast<uint64_t>(esp_timer_get_time() / 1000);
     return true;
 }
 

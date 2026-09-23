@@ -185,18 +185,36 @@ public:
         Application::GetInstance().RegisterUserTextCallback([](const std::string& text) {
             BoardBridge::GetInstance().EnqueueUserText(text);
         });
-        Application::GetInstance().RegisterRobotTextCallback([](const std::string& text) {
-            BoardBridge::GetInstance().EnqueueRobotText(text);
-        });
+        Application::GetInstance().RegisterRobotTextCallback(
+            [](uint32_t turn_id, uint64_t timestamp_ms, const std::string& text) {
+                BoardBridge::GetInstance().EnqueueRobotText(turn_id, timestamp_ms, text);
+            });
         Application::GetInstance().RegisterUserAudioCallback([](const AudioStreamPacket& packet) {
             BoardBridge::GetInstance().EnqueueUserAudio(packet);
         });
         Application::GetInstance().RegisterRobotAudioCallback([](const AudioStreamPacket& packet) {
             BoardBridge::GetInstance().EnqueueRobotAudio(packet);
         });
-        Application::GetInstance().RegisterRobotAudioEndCallback([]() {
-            BoardBridge::GetInstance().EnqueueRobotAudioEnd();
-        });
+        Application::GetInstance().RegisterRobotFirstAudioCallback(
+            [](uint32_t turn_id, uint64_t timestamp_ms) {
+                BoardBridge::GetInstance().EnqueueRobotFirstAudio(turn_id, timestamp_ms);
+            });
+        Application::GetInstance().RegisterRobotAudioEndCallback(
+            [](uint32_t turn_id, uint64_t timestamp_ms) {
+                BoardBridge::GetInstance().EnqueueRobotAudioEnd(turn_id, timestamp_ms);
+            });
+        Application::GetInstance().RegisterRobotPlaybackStartCallback(
+            [](uint32_t turn_id, uint64_t timestamp_ms) {
+                BoardBridge::GetInstance().EnqueueRobotPlaybackStart(turn_id, timestamp_ms);
+            });
+        Application::GetInstance().RegisterRobotPlaybackEndCallback(
+            [](uint32_t turn_id, uint64_t timestamp_ms) {
+                BoardBridge::GetInstance().EnqueueRobotPlaybackEnd(turn_id, timestamp_ms);
+            });
+        Application::GetInstance().RegisterRobotPlaybackAbortCallback(
+            [](uint32_t turn_id, uint64_t timestamp_ms, const std::string& reason) {
+                BoardBridge::GetInstance().EnqueueRobotPlaybackAbort(turn_id, timestamp_ms, reason);
+            });
     }
 
     virtual void StartNetwork() override {

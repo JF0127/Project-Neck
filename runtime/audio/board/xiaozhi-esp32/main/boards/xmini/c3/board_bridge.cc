@@ -1,5 +1,6 @@
 #include "board_bridge.h"
 
+#include "config.h"
 #include "protocol.h"
 
 #include <cJSON.h>
@@ -18,8 +19,6 @@
 
 namespace {
 
-constexpr char kUbuntuIp[] = "192.168.110.234";
-constexpr uint16_t kUbuntuPort = 8766;
 constexpr UBaseType_t kTextQueueCapacity = 12;
 constexpr UBaseType_t kUserAudioQueueCapacity = 4;
 constexpr UBaseType_t kRobotAudioQueueCapacity = 4;
@@ -56,8 +55,8 @@ int ConnectToUbuntu() {
 
     struct sockaddr_in dest_addr = {};
     dest_addr.sin_family = AF_INET;
-    dest_addr.sin_port = htons(kUbuntuPort);
-    if (inet_pton(AF_INET, kUbuntuIp, &dest_addr.sin_addr) != 1) {
+    dest_addr.sin_port = htons(BOARD_BRIDGE_PORT);
+    if (inet_pton(AF_INET, BOARD_BRIDGE_HOST, &dest_addr.sin_addr) != 1) {
         ESP_LOGE(kTag, "Invalid Ubuntu IP");
         close(sock);
         return -1;
@@ -69,7 +68,8 @@ int ConnectToUbuntu() {
         return -1;
     }
 
-    ESP_LOGI(kTag, "Connected to %s:%u", kUbuntuIp, kUbuntuPort);
+    ESP_LOGI(kTag, "Connected to %s:%u", BOARD_BRIDGE_HOST,
+             static_cast<unsigned>(BOARD_BRIDGE_PORT));
     return sock;
 }
 
@@ -83,27 +83,57 @@ bool SendUserAudioFrame(int sock, uint32_t sequence, const std::vector<uint8_t>&
            SendAll(sock, reinterpret_cast<const char*>(payload.data()), payload.size());
 }
 
-bool SendRobotAudioFrame(int sock, uint32_t sequence, uint32_t sample_rate,
+bool SendRobotAudioFrame(int sock, uint32_t sequence, uint32_t turn_id, uint32_t sample_rate,
                          uint16_t frame_duration_ms, uint8_t channels,
                          const std::vector<uint8_t>& payload) {
-    uint8_t header[16] = {0x02};
+    uint8_t header[20] = {0x03};
     uint32_t sequence_be = htonl(sequence);
     uint32_t length_be = htonl(static_cast<uint32_t>(payload.size()));
+    uint32_t turn_id_be = htonl(turn_id);
     uint32_t sample_rate_be = htonl(sample_rate);
     uint16_t frame_duration_be = htons(frame_duration_ms);
     memcpy(header + 1, &sequence_be, sizeof(sequence_be));
     memcpy(header + 5, &length_be, sizeof(length_be));
-    memcpy(header + 9, &sample_rate_be, sizeof(sample_rate_be));
-    memcpy(header + 13, &frame_duration_be, sizeof(frame_duration_be));
-    header[15] = channels;
+    memcpy(header + 9, &turn_id_be, sizeof(turn_id_be));
+    memcpy(header + 13, &sample_rate_be, sizeof(sample_rate_be));
+    memcpy(header + 17, &frame_duration_be, sizeof(frame_duration_be));
+    header[19] = channels;
     return SendAll(sock, reinterpret_cast<const char*>(header), sizeof(header)) &&
            SendAll(sock, reinterpret_cast<const char*>(payload.data()), payload.size());
 }
 
-std::string SerializeText(const char* type, const std::string& text) {
+std::string SerializeText(const char* type, const std::string& text, uint32_t turn_id = 0,
+                          uint64_t timestamp_ms = 0) {
     cJSON* root = cJSON_CreateObject();
     if (root == nullptr || cJSON_AddStringToObject(root, "type", type) == nullptr ||
+        (turn_id != 0 && cJSON_AddNumberToObject(root, "turn_id", turn_id) == nullptr) ||
+        (timestamp_ms != 0 &&
+         cJSON_AddNumberToObject(root, "timestamp_ms", static_cast<double>(timestamp_ms)) == nullptr) ||
         cJSON_AddStringToObject(root, "text", text.c_str()) == nullptr) {
+        cJSON_Delete(root);
+        return {};
+    }
+
+    char* json = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (json == nullptr) {
+        return {};
+    }
+
+    std::string message(json);
+    cJSON_free(json);
+    message.push_back('\n');
+    return message;
+}
+
+std::string SerializeEvent(const char* type, uint32_t turn_id, uint64_t timestamp_ms = 0,
+                           const std::string& reason = {}) {
+    cJSON* root = cJSON_CreateObject();
+    if (root == nullptr || cJSON_AddStringToObject(root, "type", type) == nullptr ||
+        cJSON_AddNumberToObject(root, "turn_id", turn_id) == nullptr ||
+        (timestamp_ms != 0 &&
+         cJSON_AddNumberToObject(root, "timestamp_ms", static_cast<double>(timestamp_ms)) == nullptr) ||
+        (!reason.empty() && cJSON_AddStringToObject(root, "reason", reason.c_str()) == nullptr)) {
         cJSON_Delete(root);
         return {};
     }
@@ -164,19 +194,21 @@ void BoardBridge::Start() {
 }
 
 bool BoardBridge::EnqueueUserText(const std::string& text) {
-    return EnqueueText(MessageType::UserText, text);
+    return EnqueueText(MessageType::UserText, 0, 0, text);
 }
 
-bool BoardBridge::EnqueueRobotText(const std::string& text) {
-    return EnqueueText(MessageType::RobotText, text);
+bool BoardBridge::EnqueueRobotText(uint32_t turn_id, uint64_t timestamp_ms,
+                                   const std::string& text) {
+    return EnqueueText(MessageType::RobotText, turn_id, timestamp_ms, text);
 }
 
-bool BoardBridge::EnqueueText(MessageType type, const std::string& text) {
+bool BoardBridge::EnqueueText(MessageType type, uint32_t turn_id, uint64_t timestamp_ms,
+                              const std::string& text) {
     if (text_queue_ == nullptr) {
         return false;
     }
 
-    auto* message = new (std::nothrow) Message{type, text};
+    auto* message = new (std::nothrow) Message{type, turn_id, timestamp_ms, text};
     if (message != nullptr && xQueueSend(text_queue_, &message, 0) == pdPASS) {
         if (task_ != nullptr) {
             xTaskNotifyGive(task_);
@@ -188,10 +220,27 @@ bool BoardBridge::EnqueueText(MessageType type, const std::string& text) {
     uint32_t dropped = dropped_count_.fetch_add(1) + 1;
     if (dropped == 1 || dropped % 32 == 0) {
         const char* type_name = "robot_audio_end";
-        if (type == MessageType::UserText) {
-            type_name = "user_text";
-        } else if (type == MessageType::RobotText) {
-            type_name = "robot_text";
+        switch (type) {
+            case MessageType::UserText:
+                type_name = "user_text";
+                break;
+            case MessageType::RobotText:
+                type_name = "robot_text";
+                break;
+            case MessageType::RobotFirstAudio:
+                type_name = "robot_first_audio";
+                break;
+            case MessageType::RobotPlaybackStart:
+                type_name = "robot_playback_start";
+                break;
+            case MessageType::RobotPlaybackEnd:
+                type_name = "robot_playback_end";
+                break;
+            case MessageType::RobotPlaybackAbort:
+                type_name = "robot_playback_abort";
+                break;
+            case MessageType::RobotAudioEnd:
+                break;
         }
         ESP_LOGW(kTag, "Dropped %s, total=%lu", type_name, static_cast<unsigned long>(dropped));
     }
@@ -232,6 +281,7 @@ bool BoardBridge::EnqueueRobotAudio(const AudioStreamPacket& packet) {
 
     auto* message = new (std::nothrow) RobotAudioMessage{
         sequence,
+        packet.robot_turn_id,
         static_cast<uint32_t>(packet.sample_rate),
         static_cast<uint16_t>(packet.frame_duration),
         kRobotAudioChannels,
@@ -249,8 +299,25 @@ bool BoardBridge::EnqueueRobotAudio(const AudioStreamPacket& packet) {
     return false;
 }
 
-bool BoardBridge::EnqueueRobotAudioEnd() {
-    return EnqueueText(MessageType::RobotAudioEnd, {});
+bool BoardBridge::EnqueueRobotFirstAudio(uint32_t turn_id, uint64_t timestamp_ms) {
+    return EnqueueText(MessageType::RobotFirstAudio, turn_id, timestamp_ms, {});
+}
+
+bool BoardBridge::EnqueueRobotAudioEnd(uint32_t turn_id, uint64_t timestamp_ms) {
+    return EnqueueText(MessageType::RobotAudioEnd, turn_id, timestamp_ms, {});
+}
+
+bool BoardBridge::EnqueueRobotPlaybackStart(uint32_t turn_id, uint64_t timestamp_ms) {
+    return EnqueueText(MessageType::RobotPlaybackStart, turn_id, timestamp_ms, {});
+}
+
+bool BoardBridge::EnqueueRobotPlaybackEnd(uint32_t turn_id, uint64_t timestamp_ms) {
+    return EnqueueText(MessageType::RobotPlaybackEnd, turn_id, timestamp_ms, {});
+}
+
+bool BoardBridge::EnqueueRobotPlaybackAbort(uint32_t turn_id, uint64_t timestamp_ms,
+                                            const std::string& reason) {
+    return EnqueueText(MessageType::RobotPlaybackAbort, turn_id, timestamp_ms, reason);
 }
 
 void BoardBridge::SenderTaskEntry(void* arg) {
@@ -315,13 +382,48 @@ void BoardBridge::SenderTask() {
                 message = SerializeText(type, queued->text);
             } else if (queued->type == MessageType::RobotText) {
                 type = "robot_text";
-                message = SerializeText(type, queued->text);
+                message = SerializeText(type, queued->text, queued->turn_id, queued->timestamp_ms);
+            } else if (queued->type == MessageType::RobotFirstAudio) {
+                type = "robot_first_audio";
+                message = SerializeEvent(type, queued->turn_id, queued->timestamp_ms);
+            } else if (queued->type == MessageType::RobotAudioEnd) {
+                message = SerializeEvent(type, queued->turn_id, queued->timestamp_ms);
+            } else if (queued->type == MessageType::RobotPlaybackStart) {
+                type = "robot_playback_start";
+                message = SerializeEvent(type, queued->turn_id, queued->timestamp_ms);
+            } else if (queued->type == MessageType::RobotPlaybackEnd) {
+                type = "robot_playback_end";
+                message = SerializeEvent(type, queued->turn_id, queued->timestamp_ms);
             } else {
-                message = "{\"type\":\"robot_audio_end\"}\n";
+                type = "robot_playback_abort";
+                message = SerializeEvent(type, queued->turn_id, queued->timestamp_ms, queued->text);
             }
             if (message.empty()) {
                 ESP_LOGW(kTag, "Failed to serialize %s", type);
                 continue;
+            }
+            if (queued->type == MessageType::RobotText) {
+                ESP_LOGI(kTag, "[BRIDGE] robot text turn=%lu text=\"%s\"",
+                         static_cast<unsigned long>(queued->turn_id), queued->text.c_str());
+            } else if (queued->type == MessageType::RobotFirstAudio) {
+                ESP_LOGI(kTag, "[BRIDGE] first robot audio turn=%lu ts=%llu",
+                         static_cast<unsigned long>(queued->turn_id),
+                         static_cast<unsigned long long>(queued->timestamp_ms));
+            } else if (queued->type == MessageType::RobotAudioEnd) {
+                ESP_LOGI(kTag, "[BRIDGE] tts stream end turn=%lu",
+                         static_cast<unsigned long>(queued->turn_id));
+            } else if (queued->type == MessageType::RobotPlaybackStart) {
+                ESP_LOGI(kTag, "[BRIDGE] playback start turn=%lu ts=%llu",
+                         static_cast<unsigned long>(queued->turn_id),
+                         static_cast<unsigned long long>(queued->timestamp_ms));
+            } else if (queued->type == MessageType::RobotPlaybackEnd) {
+                ESP_LOGI(kTag, "[BRIDGE] playback end turn=%lu ts=%llu",
+                         static_cast<unsigned long>(queued->turn_id),
+                         static_cast<unsigned long long>(queued->timestamp_ms));
+            } else if (queued->type == MessageType::RobotPlaybackAbort) {
+                ESP_LOGI(kTag, "[BRIDGE] playback abort turn=%lu reason=%s ts=%llu",
+                         static_cast<unsigned long>(queued->turn_id), queued->text.c_str(),
+                         static_cast<unsigned long long>(queued->timestamp_ms));
             }
             send_ok = SendAll(sock, message.data(), message.size());
         } else {
@@ -344,7 +446,8 @@ void BoardBridge::SenderTask() {
             } else if (robot_audio_message != nullptr) {
                 std::unique_ptr<RobotAudioMessage> queued(robot_audio_message);
                 send_ok = SendRobotAudioFrame(
-                    sock, queued->sequence, queued->sample_rate, queued->frame_duration_ms,
+                    sock, queued->sequence, queued->turn_id, queued->sample_rate,
+                    queued->frame_duration_ms,
                     queued->channels, queued->payload);
                 prefer_user_audio = true;
             } else {

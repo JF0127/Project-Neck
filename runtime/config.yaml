@@ -46,3 +46,30 @@ motor:
   socket_path: /tmp/neck_model.sock
   measurement_socket: /tmp/neck_measurement.sock
   mock: false
+xiaozhi:
+  host: 0.0.0.0
+  port: 8766
+global_motion:
+  fps: 30
+  chunk_duration_sec: 1.0
+  cycle_duration_sec: 8.0
+  cycle_duration_variation: 0.06
+  yaw_amplitude_deg: 4.5
+  pitch_amplitude_deg: 2.5
+  roll_amplitude_deg: 1.2
+  yaw_phase_deg: 0
+  pitch_phase_deg: 50
+  roll_phase_deg: -70
+  yaw_harmonic_ratio: 0.12
+  pitch_harmonic_ratio: 0.10
+  roll_harmonic_ratio: 0.10
+  yaw_harmonic_phase_deg: 35
+  pitch_harmonic_phase_deg: 120
+  roll_harmonic_phase_deg: 20
+  parameter_variation: 0.06
+  state_transition_sec: 1.5
+  states:
+    silent: {amplitude: 0.85, speed: 0.90}
+    listening: {amplitude: 0.95, speed: 0.95}
+    thinking: {amplitude: 0.90, speed: 0.90}
+    speaking: {amplitude: 1.0, speed: 1.0}
