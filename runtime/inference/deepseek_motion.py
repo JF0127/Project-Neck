@@ -358,6 +358,7 @@ class DeepSeekMotionBackend(MotionBackend):
         raw_response: str | None = None
         alignment, alignment_metadata = self._align_speech(robot_text.strip(), speech)
         payload_segments: list[dict[str, Any]] | None = None
+        prosody: ProsodyAnalysis | None = None
         if alignment is not None:
             try:
                 prosody = self._prosody_extractor(
@@ -390,6 +391,7 @@ class DeepSeekMotionBackend(MotionBackend):
                 )
                 log(f"[MOTION][PROSODY] fallback: {reason}")
                 payload_segments = None
+                prosody = None
         else:
             self._write_json(
                 self.prosody_path,
@@ -417,7 +419,7 @@ class DeepSeekMotionBackend(MotionBackend):
                 ) from exc
             plan = MotionPlan.from_dict(document)
             validate_motion_plan(plan, expected_duration_sec=duration_sec)
-            output = self._trajectory_generator.generate(plan)
+            output = self._trajectory_generator.generate(plan, prosody)
             self._write_json(self.motion_plan_path, plan.to_dict())
             self._write_raw_relative_trajectory(
                 robot_text.strip(), duration_sec, output

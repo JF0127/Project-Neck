@@ -27,7 +27,7 @@ tools/      项目级分析/可视化工具
 | Algorithm | Baseline V1（audio+text → 30 fps `rpy_offset`）已实现；训练产物在 `algorithm/outputs/`（gitignored）。部署包 `runtime/models/baseline/{model.pt,vocab.json,config.yaml}`（TorchScript，gitignored） |
 | Runtime | 当前 Ubuntu 主链为 Silero VAD + Qwen3-ASR Streaming + DeepSeek 对话 + Doubao TTS；动作使用 DeepSeek MotionPlan V2。默认 `motion.send_to_motor=false`，只生成 relative trajectory artifact，不启动反馈或连接 Motor；显式开启后才经 MotionProcessor 发送 Motor（见 §3） |
 | Motor | SOEM EtherCAT 主站；三电机；`model` / `measurement` / `feedback` 三个 UDS；速度后处理。反馈需先手动归零（§4.4） |
-| Motion | 默认 `DeepSeekMotionBackend` 消费 robot text、TTS duration、PCM phrase alignment 与可解释 prosody，输出允许空 segments 的高层 `MotionPlan`；Validator 后由 Continuous Motion Generator V3 将 deterministic speaking base flow 与 `nod/turn/tilt/shake` 局部 modulation 合成为 30 fps relative RPY。Legacy sparse parser/compiler、`BaselineV1Backend` 与部署包均保留。完整 absolute trajectory 在 start continuity 与 neutral return 后统一经过未改默认行为的固定长度 `TrajectoryOptimizer` |
+| Motion | 默认 `DeepSeekMotionBackend` 消费 robot text、TTS duration、PCM phrase alignment 与可解释 prosody，输出允许空 segments 的高层 `MotionPlan`；Validator 后将同轮 `ProsodyAnalysis`（失败时为 None）传给 Continuous Motion Generator V4：独立三轴慢速 Postural Flow + 高能量 phrase 的局部 Prosodic Accent + `nod/turn/tilt/shake` 语义 modulation，合成为 30 fps relative RPY。Legacy sparse parser/compiler、`BaselineV1Backend` 与部署包均保留。完整 absolute trajectory 在 start continuity 与 neutral return 后统一经过未改默认行为的固定长度 `TrajectoryOptimizer` |
 
 仓库当前**没有自动化测试目录**（已按维护成本约定删除）；验证依靠运行命令、`ctest`（motor 保留原有 C++ 测试）和手动真机测试。
 
@@ -41,7 +41,7 @@ tools/      项目级分析/可视化工具
                      │  robot.wav / metadata.json                     │  PCM
                      ▼                                                ▼
   PCM phrase alignment → Prosody → DeepSeek MotionPlan V2 → Validator
-                     → Continuous Motion Generator V3 → raw_relative_trajectory.json
+                     → Continuous Motion Generator V4 → raw_relative_trajectory.json
                      │                                                │
                      ├─ send_to_motor=false: 仅保存 relative artifact ─┤
                      │                                                │
@@ -59,13 +59,13 @@ tools/      项目级分析/可视化工具
 
 - 产物目录（每轮覆盖）：`runtime/generated/{robot.wav,prosody.json,deepseek_motion_plan_raw.json,motion_plan.json,raw_relative_trajectory.json,metadata.json}`；开启 Motor 发送时另写 `final_trajectory.json` 与 Motor 文档 `trajectory.json`。relative trajectory 固定 30 fps、radian、`[roll,pitch,yaw]`，不经过 measured RPY 或 MotionProcessor；final artifact 是经过 MotionProcessor/Optimizer 的 absolute RPY。
 - Speech Alignment 在完整 TTS PCM 生成后执行：中文文本保守切为最多 4 个 phrase，优先使用 10 ms PCM RMS 检测到的真实停顿边界，其次使用局部低能量 valley；证据不足时显式标记 `proportional_fallback`。Prosody V1 从 PCM/alignment 提取 segment duration、前后 pause、RMS mean/peak、句内 relative energy、energy peak time、字符语速和离散等级；当前无可靠 F0 依赖，artifact 明确记录该特征未提取。alignment/prosody 不可用时回退原 `text + duration` payload，不伪造音频特征。
-- MotionPlan V2 顶层固定为 `mode/duration_sec/segments`，segment 固定为 `start_sec/end_sec/action/primary_axis/amplitude_deg/reason`；空 segments 表示没有 semantic gesture，但 V3 仍生成轻微 speaking base flow。临时 action vocabulary 为 `nod→pitch`、`turn→yaw`、`tilt→roll`、`shake→yaw`。Validator 集中检查 schema、时长、动作—轴兼容、±5° 幅度及 overlap；任一非法 segment 令整份 plan 失败，不再局部接受。
-- Continuous Motion Generator V3 先用非等距 deterministic anchors 和 minimum-jerk transition 生成低幅度三轴 carrier，再将 nod/turn/tilt 的单轴 smooth excursion 与 shake 的 `0→+A→-0.8A→0` oscillation 作为局部 modulation 叠加；modulation 归零表示回到当时 carrier，不再回 motion-start zero。第一帧严格为 zero，最后一帧允许保持非零 speaking pose；默认 composed relative 单轴上限为 ±5°，越界时优先衰减 base contribution。旧 `motion_compiler.py` sparse action parser/compiler 保留供 legacy 回归和 V1 audit，不在默认 production path。
+- MotionPlan V2 顶层固定为 `mode/duration_sec/segments`，segment 固定为 `start_sec/end_sec/action/primary_axis/amplitude_deg/reason`；空 segments 表示没有 semantic gesture，但 V4 仍生成慢速 postural flow；有高能量 prosody 时可叠加非语义的 pitch accent。临时 action vocabulary 为 `nod→pitch`、`turn→yaw`、`tilt→roll`、`shake→yaw`。Validator 集中检查 schema、时长、动作—轴兼容、±5° 幅度及 overlap；任一非法 segment 令整份 plan 失败，不再局部接受。
+- Continuous Motion Generator V4 三层独立生成（`generate_layers()` 可在软件实验导出完整 radian RPY 层）：Postural Flow 用每轴不同的不均匀间隔、长 pattern、minimum-jerk MOVE + soft HOLD，roll/pitch/yaw 目标幅度分别为 0.9/1.4/1.9°，间隔约 2.4～3.2/2.2～3.0/1.8～2.7 s；majority slow/fast 的语速只将间隔乘 1.06/0.94，不用随机或正弦。Prosodic Accent 仅对 high energy 或 relative_energy>1.15 的 phrase，在 energy_peak_time_sec 附近生成 0.3～0.75° pitch 短时 minimum-jerk excursion，宽度 0.35～0.65 s（受 segment duration 限制）；无可靠 prosody 时该层全零，暂不按 pause 调节 postural hold。Semantic Gesture 仍使用 nod/turn/tilt 单轴 smooth excursion 与 shake 的 `0→+A→-0.8A→0`，归零回到当时 carrier 而非 global zero。第一帧严格 zero，末帧不强制归零；合成逐轴 ±5°，越界依序缩小同向 postural、prosodic、最后 semantic（数值末级 clamp）。旧 `motion_compiler.py` sparse action parser/compiler 保留供 legacy 回归和 V1 audit，不在默认 production path。
 - `TrajectoryOptimizer` 在完整 absolute RPY 上执行对称 `[1,4,6,4,1]/16` smoothing、position-domain 速度投影和迭代加速度投影；固定 30 fps、帧数、首末姿态和 states。默认参数仍为 1 pass、60 deg/s、500 deg/s²、最多 64 轮投影，不做 jerk limit 或语义优化。
 - DeepSeek Motion API、JSON、MotionPlan validation/generation、Motor 或反馈失败均只跳过本轮动作，语音正常播放，不使用默认摇头；`head_rpy_valid == false` 同样只播音频。Baseline A/B 路径仍保留原 fallback。
 - Qwen 主链等待 Audio Client 在实际启动本地播放时回传 `robot_playback_started`，随后发送轨迹；`motion.sync_offset_ms` 仅作为该事件之后的微调（当前为 0）。
 - 轨迹发送前会检查 `RobotState.motion_executing`，避免与正在执行的轨迹冲突。
-- `tools/motion_diversity_audit.py` 保留原 V1 审计与产物；`tools/motion_diversity_audit_v2.py` 对同一固定 16 句各生成一次真实 Doubao TTS，并复用 PCM/alignment/prosody 调用 V2 Planner 各 3 次，结果在 `runtime/experiments/motion_diversity_audit_v2/`。当前实测 48 次请求中 46 次完整成功，G2 的 run 1/3 因 action overlap 被 Validator 拒绝并保留 raw/error；完整比较见该目录 `report.md`。
+- `tools/motion_diversity_audit.py` 保留原 V1 审计与产物；`tools/motion_diversity_audit_v2.py` 对同一固定 16 句各生成一次真实 Doubao TTS，并复用 PCM/alignment/prosody 调用 V2 Planner 各 3 次，结果在 `runtime/experiments/motion_diversity_audit_v2/`。当前 V2 audit 实测 48 次请求中 46 次完整成功，G2 的 run 1/3 因 action overlap 被 Validator 拒绝并保留 raw/error；完整比较见该目录 `report.md`。`tools/continuous_motion_v4.py` 纯软件合成 prosody/plan，导出 V4 三层及 raw/optimized、V3 同 plan 对比的 metrics/7 张曲线至 `runtime/experiments/continuous_motion_v4/`（gitignored；无需网络/硬件）。
 
 ## 4. 冻结接口
 
@@ -299,8 +299,11 @@ export VOLCENGINE_TTS_API_KEY="<your-key>"
 export VOLCENGINE_TTS_SPEAKER="zh_female_vv_uranus_bigtts"  # 可选
 python -m runtime
 
-# MotionPlan V2 数据结构、prosody、validator、Continuous Generator V3、pipeline、legacy compiler 和 Optimizer 纯软件回归
+# MotionPlan V2 数据结构、prosody、validator、Continuous Generator V4、pipeline、legacy compiler 和 Optimizer 纯软件回归
 python -m unittest runtime.qwen_streaming_runtime_test runtime.inference.motion_plan_test runtime.inference.prosody_test runtime.inference.motion_plan_validator_test runtime.inference.trajectory_generator_test runtime.inference.deepseek_motion_test runtime.inference.motion_compiler_test runtime.inference.speech_alignment_test runtime.inference.trajectory_optimizer_test -v
+
+# V4 三层 + V3 对比的纯软件可视化（使用已安装 matplotlib 的 Dataset 环境，不连接硬件）
+dataset/.venv/bin/python tools/continuous_motion_v4.py
 
 # V1 结果保留；V2 audit：真实 16 次 TTS + 48 次 DeepSeek Motion API，不连接硬件
 python tools/motion_diversity_audit_v2.py --phase collect --reset

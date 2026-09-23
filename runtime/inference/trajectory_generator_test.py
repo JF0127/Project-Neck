@@ -1,4 +1,4 @@
-"""Tests for Continuous Motion Generator V3."""
+"""Tests for Continuous Motion Generator V4."""
 from __future__ import annotations
 
 import math
@@ -8,7 +8,8 @@ import numpy as np
 
 from .motion_plan import MotionPlan, MotionSegment
 from .processor import MotionProcessor
-from .trajectory_generator import TrajectoryGenerator
+from .trajectory_generator import TrajectoryGenerator, _compose_v4
+from .prosody import ProsodyAnalysis, SegmentProsody
 
 
 FPS = 30.0
@@ -53,11 +54,93 @@ class TrajectoryGeneratorTest(unittest.TestCase):
         np.testing.assert_array_equal(first[0], np.zeros(3))
         self.assertTrue(np.isfinite(first).all())
         self.assertTrue(np.any(np.abs(first[1:]) > 0.0))
-        self.assertLessEqual(float(np.max(np.abs(np.degrees(first)))), 0.5)
+        self.assertLessEqual(float(np.max(np.abs(np.degrees(first)))), 2.0)
+        self.assertGreater(float(np.max(np.abs(np.degrees(first)))), 0.5)
         self.assertLess(
             float(np.max(np.abs(np.degrees(np.diff(first, axis=0))))),
             0.1,
         )
+
+    @staticmethod
+    def _prosody() -> ProsodyAnalysis:
+        def segment(start: float, end: float, energy: float, level: str, peak: float) -> SegmentProsody:
+            return SegmentProsody("测试", start, end, end - start, 0., 0., .1, .2,
+                                  energy, level, 5., "normal", peak)
+        return ProsodyAnalysis(6., 16000, (
+            segment(0., 2., .8, "low", 1.),
+            segment(2., 4., 1.7, "high", 2.9),
+            segment(4., 6., .9, "medium", 5.),
+        ), 0.)
+
+    def test_postural_only_is_slow_asynchronous_with_holds(self) -> None:
+        plan = MotionPlan("speaking", 28., ())
+        layers = TrajectoryGenerator().generate_layers(plan, self._prosody(),
+                                                         include_prosodic=False, include_semantic=False)
+        values = np.degrees(np.asarray(layers.postural_flow))
+        np.testing.assert_array_equal(values, np.degrees(layers.composed_raw))
+        velocity = np.abs(np.diff(values, axis=0) * FPS)
+        self.assertLess(float(np.max(velocity)), 4.)
+        self.assertLess(float(np.mean(velocity)), 0.65)
+        self.assertGreater(float(np.min(np.mean(velocity < 0.03, axis=0))), 0.15)
+        self.assertGreater(float(np.mean(np.abs(values[30:]) > 0.1)), 0.6)
+        # Axis transitions do not all start/end at the same timestamps.
+        active = velocity > .1
+        self.assertGreater(float(np.mean(np.sum(active, axis=1) == 1)), 0.1)
+        self.assertFalse(np.array_equal(active[:, 0], active[:, 2]))
+
+    def test_prosodic_accent_local_to_high_energy_peak(self) -> None:
+        plan = MotionPlan("speaking", 6., ())
+        layers = TrajectoryGenerator().generate_layers(plan, self._prosody())
+        accent = np.degrees(np.asarray(layers.prosodic_accent))
+        np.testing.assert_array_equal(accent[:60], 0.)
+        np.testing.assert_array_equal(accent[120:], 0.)
+        self.assertGreater(float(np.max(np.abs(accent[60:120, 1]))), .3)
+        self.assertLessEqual(float(np.max(np.abs(accent))), .75 + 1e-10)
+        np.testing.assert_array_equal(layers.semantic_gesture, np.zeros((180, 3)))
+        np.testing.assert_allclose(np.asarray(layers.composed_raw),
+                                   np.asarray(layers.postural_flow) + np.asarray(layers.prosodic_accent))
+        self.assertGreater(np.linalg.norm(layers.composed_raw[-1]), 0.)
+
+    def test_three_layers_are_separate_and_semantic_is_sparse(self) -> None:
+        plan = MotionPlan("speaking", 6., (
+            MotionSegment(2.4, 3.2, "nod", "pitch", 2.0, "emphasis"),
+            MotionSegment(4.5, 5.3, "turn", "yaw", 2.0, "shift"),
+        ))
+        layers = TrajectoryGenerator().generate_layers(plan, self._prosody())
+        post, accent, gesture, composed = (np.asarray(getattr(layers, key)) for key in
+            ("postural_flow", "prosodic_accent", "semantic_gesture", "composed_raw"))
+        np.testing.assert_allclose(composed, post + accent + gesture)
+        self.assertGreater(np.max(np.abs(gesture[72:96, 1])), math.radians(1.9))
+        self.assertGreater(np.max(np.abs(gesture[135:159, 2])), math.radians(1.9))
+        np.testing.assert_array_equal(gesture[:72], 0.)
+        np.testing.assert_array_equal(gesture[96:135], 0.)
+        np.testing.assert_array_equal(gesture[159:], 0.)
+        empty = TrajectoryGenerator().generate_layers(MotionPlan("speaking", 6., ()), self._prosody())
+        np.testing.assert_array_equal(post, empty.postural_flow)
+        np.testing.assert_array_equal(accent, empty.prosodic_accent)
+
+    def test_safety_priority_postural_then_accent_then_semantic(self) -> None:
+        deg = lambda values: [[math.radians(x) for x in values]]
+        result = _compose_v4(deg([2, 0, 0]), deg([.6, 0, 0]), deg([4, 0, 0]), 5)
+        self.assertAlmostEqual(math.degrees(result[0][0]), 5)
+        # Carrier alone absorbs the overflow (1.6 deg), retaining the accent and gesture.
+        self.assertAlmostEqual(2 + .6 + 4 - 1.6, math.degrees(result[0][0]))
+        result = _compose_v4(deg([.2, 0, 0]), deg([1, 0, 0]), deg([5, 0, 0]), 5)
+        self.assertAlmostEqual(math.degrees(result[0][0]), 5)
+        result = _compose_v4(deg([-2, 0, 0]), deg([.2, 0, 0]), deg([5, 0, 0]), 5)
+        self.assertAlmostEqual(math.degrees(result[0][0]), 3.2)
+        # Even an out-of-contract excursion is limited only after the other layers.
+        result = _compose_v4(deg([.5, 0, 0]), deg([1, 0, 0]), deg([6, 0, 0]), 5)
+        self.assertAlmostEqual(math.degrees(result[0][0]), 5)
+
+    def test_first_frame_with_zero_start_gesture_and_peak_is_zero(self) -> None:
+        p = ProsodyAnalysis(1., 16000, (
+            SegmentProsody("重", 0., 1., 1., 0., 0., .1, .1, 1.6, "high", 5., "normal", 0.),
+        ), 0.)
+        layers = TrajectoryGenerator().generate_layers(self._plan(
+            "nod", "pitch", duration=1., start=0., end=.7), p)
+        for field in ("postural_flow", "prosodic_accent", "semantic_gesture", "composed_raw"):
+            np.testing.assert_array_equal(getattr(layers, field)[0], [0., 0., 0.])
 
     def test_single_gestures_are_local_modulations_over_the_base(self) -> None:
         base = self._values(MotionPlan("speaking", 3.0, ()))

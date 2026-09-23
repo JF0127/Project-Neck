@@ -1,4 +1,4 @@
-"""Deterministic Continuous Motion Generator V3 for speaking MotionPlans."""
+"""Deterministic Continuous Motion Generator V4 for speaking MotionPlans."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -8,8 +8,10 @@ from ..contracts import MotionOutput
 from .base import MOTION_FPS
 from .motion_plan import MotionPlan, MotionSegment
 from .motion_plan_validator import validate_motion_plan
+from .prosody import ProsodyAnalysis
 
-# Conservative V3 engineering defaults, not a final Motion Design Specification.
+# Legacy V3 base settings retained for reproducible software comparison;
+# shake and composed limit remain shared engineering defaults.
 NOD_PHASE_RATIOS = (0.45, 0.10, 0.45)
 TURN_PHASE_RATIOS = (0.35, 0.30, 0.35)
 TILT_PHASE_RATIOS = (0.30, 0.40, 0.30)
@@ -38,6 +40,25 @@ _BASE_TARGET_PATTERN = (
     (-0.30, -0.65, -0.70),
 )
 _AXIS_INDEX = {"roll": 0, "pitch": 1, "yaw": 2}
+
+# Each axis has its own non-uniform clock, target series and MOVE/HOLD ratios.
+# The co-prime series lengths avoid a short repeated three-axis pose cycle.
+_POSTURAL_INTERVALS = (
+    (2.6, 3.0, 2.4, 2.8, 3.1, 2.5, 2.9, 2.7, 3.2),  # roll
+    (2.2, 2.7, 2.4, 2.9, 2.3, 2.6, 3.0, 2.5, 2.8, 2.4, 2.7),  # pitch
+    (1.9, 2.3, 2.0, 2.6, 2.2, 2.5, 1.8, 2.4, 2.1, 2.7, 2.0, 2.3, 2.5),  # yaw
+)
+_POSTURAL_TARGETS = (
+    (0.45, 0.15, -0.55, -0.25, 0.75, 0.2, -0.8, -0.8, 0.35),
+    (-0.5, -0.9, -0.2, 0.55, 0.35, -0.65, -0.3, 0.7, 0.1, -0.8, 0.4),
+    (0.6, 0.95, 0.35, -0.45, -0.85, -0.15, 0.5, 0.8, 0.2, -0.7, -0.3, 0.65, 0.1),
+)
+_POSTURAL_MOVE_RATIOS = (
+    (0.60, 0.72, 0.64, 0.78, 0.62),
+    (0.68, 0.60, 0.74, 0.66, 0.70),
+    (0.72, 0.66, 0.76, 0.62, 0.70),
+)
+_POSTURAL_AMPLITUDES_DEG = (0.9, 1.4, 1.9)
 
 
 def _finite_float(value: float, name: str) -> float:
@@ -236,6 +257,76 @@ def _generate_base_flow(
     return frames
 
 
+def _postural_flow(
+    duration_sec: float,
+    frame_count: int,
+    prosody: ProsodyAnalysis | None,
+) -> list[list[float]]:
+    """Sample independent minimum-jerk axis transitions, with a soft HOLD after each MOVE.
+
+    Anchors extend beyond the utterance; a short utterance never snaps to a
+    truncated endpoint. Speech rate changes clock speed by at most 6%.
+    """
+    clock = 1.0
+    if prosody is not None and prosody.segments:
+        levels = [segment.rate_level for segment in prosody.segments]
+        clock = 0.94 if levels.count("fast") > len(levels) / 2 else (
+            1.06 if levels.count("slow") > len(levels) / 2 else 1.0
+        )
+    frames = [[0.0, 0.0, 0.0] for _ in range(frame_count)]
+    for axis in range(3):
+        anchors = [(0.0, 0.0, 1.0)]
+        index = 0
+        while anchors[-1][0] < duration_sec:
+            interval = _POSTURAL_INTERVALS[axis][index % len(_POSTURAL_INTERVALS[axis])] * clock
+            target = math.radians(
+                _POSTURAL_AMPLITUDES_DEG[axis]
+                * _POSTURAL_TARGETS[axis][index % len(_POSTURAL_TARGETS[axis])]
+            )
+            ratio = _POSTURAL_MOVE_RATIOS[axis][index % len(_POSTURAL_MOVE_RATIOS[axis])]
+            anchors.append((anchors[-1][0] + interval, target, ratio))
+            index += 1
+        anchor = 1
+        for frame in range(frame_count):
+            timestamp = frame / MOTION_FPS
+            while anchor < len(anchors) - 1 and timestamp > anchors[anchor][0]:
+                anchor += 1
+            start_time, start_value, _ = anchors[anchor - 1]
+            end_time, end_value, ratio = anchors[anchor]
+            progress = min(1.0, (timestamp - start_time) / ((end_time - start_time) * ratio))
+            frames[frame][axis] = _transition(start_value, end_value, progress)
+    return frames
+
+
+def _prosodic_accents(
+    prosody: ProsodyAnalysis | None,
+    frame_count: int,
+) -> list[list[float]]:
+    """Sparse pitch emphasis around measured energy peaks; zero is the carrier."""
+    frames = [[0.0, 0.0, 0.0] for _ in range(frame_count)]
+    if prosody is None:
+        return frames
+    for index, segment in enumerate(prosody.segments):
+        if segment.energy_level != "high" and segment.relative_energy <= 1.15:
+            continue
+        center = min(segment.end_sec, max(segment.start_sec, segment.energy_peak_time_sec))
+        # Avoid very short excursions for tiny alignment segments.
+        width = min(0.65, max(0.35, 0.56 - 0.035 * (segment.speech_rate_chars_sec - 5.0)))
+        width = min(width, segment.end_sec - segment.start_sec)
+        if width < 0.25:
+            continue
+        half = width / 2
+        center = min(segment.end_sec - half, max(segment.start_sec + half, center))
+        energy = min(1.0, max(0.0, (segment.relative_energy - 1.15) / 0.85))
+        amplitude = math.radians(min(0.75, max(0.3, 0.38 + 0.30 * energy)))
+        direction = -1 if index % 3 == 2 else 1
+        for frame in range(1, frame_count):
+            distance = abs(frame / MOTION_FPS - center) / half
+            if distance < 1.0:
+                frames[frame][1] += direction * amplitude * _minimum_jerk(1.0 - distance)
+    return frames
+
+
 def _generate_gesture_modulation(
     plan: MotionPlan,
     frame_count: int,
@@ -260,6 +351,35 @@ def _generate_gesture_modulation(
             scale = _primitive_modulation_scale(segment, progress, config)
             modulation[frame_index][axis] += amplitude_rad * scale
     return modulation
+
+
+def _compose_v4(
+    postural: list[list[float]],
+    prosodic: list[list[float]],
+    semantic: list[list[float]],
+    max_offset_deg: float,
+) -> list[list[float]]:
+    """Reduce same-direction overflow: postural first, accent next, gesture last.
+
+    Never invert a layer to compensate for another layer. The final clamp is
+    only a numerical guard; validated gestures are already within the limit.
+    """
+    limit = math.radians(max_offset_deg)
+    output = []
+    for p, a, s in zip(postural, prosodic, semantic):
+        row = []
+        for components in zip(p, a, s):
+            values = list(components)
+            for layer in range(3):
+                total = sum(values)
+                if abs(total) <= limit:
+                    break
+                sign = 1 if total > 0 else -1
+                if values[layer] * sign > 0:
+                    values[layer] -= sign * min(abs(values[layer]), abs(total) - limit)
+            row.append(min(limit, max(-limit, sum(values))))
+        output.append(row)
+    return output
 
 
 def _compose_with_safety(
@@ -287,26 +407,49 @@ def _compose_with_safety(
     return frames
 
 
+@dataclass(frozen=True)
+class MotionLayers:
+    """Unclipped component layers and safe composed output, all radians RPY."""
+
+    postural_flow: tuple[tuple[float, float, float], ...]
+    prosodic_accent: tuple[tuple[float, float, float], ...]
+    semantic_gesture: tuple[tuple[float, float, float], ...]
+    composed_raw: tuple[tuple[float, float, float], ...]
+
+
 class TrajectoryGenerator:
-    """Compose a validated MotionPlan into continuous 30 Hz relative RPY."""
+    """Compose a validated MotionPlan into V4 continuous 30 Hz relative RPY."""
 
     def __init__(self, config: TrajectoryGeneratorConfig | None = None) -> None:
         self.config = config or TrajectoryGeneratorConfig()
         if not isinstance(self.config, TrajectoryGeneratorConfig):
             raise TypeError("config must be a TrajectoryGeneratorConfig")
 
-    def generate(self, plan: MotionPlan) -> MotionOutput:
+    def generate_layers(
+        self, plan: MotionPlan, prosody: ProsodyAnalysis | None = None,
+        *, include_prosodic: bool = True, include_semantic: bool = True,
+    ) -> MotionLayers:
         validate_motion_plan(plan)
+        if prosody is not None and not isinstance(prosody, ProsodyAnalysis):
+            raise TypeError("prosody must be a ProsodyAnalysis")
         frame_count = max(2, int(round(plan.duration_sec * MOTION_FPS)))
-        base = _generate_base_flow(plan.duration_sec, frame_count, self.config)
-        modulation = _generate_gesture_modulation(plan, frame_count, self.config)
-        frames = _compose_with_safety(
-            base,
-            modulation,
-            self.config.max_composed_offset_deg,
+        postural = _postural_flow(plan.duration_sec, frame_count, prosody)
+        accent = (
+            _prosodic_accents(prosody, frame_count)
+            if include_prosodic else [[0.0] * 3 for _ in range(frame_count)]
         )
-        frames[0] = [0.0, 0.0, 0.0]
-        return MotionOutput(
-            rpy_offset=tuple(tuple(frame) for frame in frames),
-            fps=MOTION_FPS,
+        semantic = (
+            _generate_gesture_modulation(plan, frame_count, self.config)
+            if include_semantic else [[0.0] * 3 for _ in range(frame_count)]
         )
+        # A segment beginning at t=0 must not displace the initial relative pose.
+        semantic[0] = [0.0, 0.0, 0.0]
+        composed = _compose_v4(postural, accent, semantic, self.config.max_composed_offset_deg)
+        return MotionLayers(
+            *(tuple(tuple(frame) for frame in layer)
+              for layer in (postural, accent, semantic, composed))
+        )
+
+    def generate(self, plan: MotionPlan, prosody: ProsodyAnalysis | None = None) -> MotionOutput:
+        layers = self.generate_layers(plan, prosody)
+        return MotionOutput(rpy_offset=layers.composed_raw, fps=MOTION_FPS)

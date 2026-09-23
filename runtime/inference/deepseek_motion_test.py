@@ -17,6 +17,8 @@ from ..contracts import (
 from .deepseek_motion import DeepSeekMotionBackend, DeepSeekMotionError
 from .generator import TurnGenerator
 from .processor import MotionProcessor
+from .trajectory_generator import TrajectoryGenerator
+from .prosody import ProsodyAnalysis
 
 
 class _Responses:
@@ -72,6 +74,24 @@ class DeepSeekMotionV2Test(unittest.TestCase):
                 "raw_relative_trajectory.json",
             ):
                 self.assertTrue(Path(directory, filename).is_file(), filename)
+
+    def test_successful_prosody_is_passed_to_generator(self) -> None:
+        class SpyGenerator(TrajectoryGenerator):
+            received = None
+
+            def generate(self, plan, prosody=None):
+                self.received = prosody
+                return super().generate(plan, prosody)
+
+        spy = SpyGenerator()
+        with tempfile.TemporaryDirectory() as directory:
+            backend = DeepSeekMotionBackend(
+                output_dir=directory, client=_Client({"mode": "speaking", "duration_sec": 1.5, "segments": []}),
+                trajectory_generator=spy,
+            )
+            backend.infer(_request(pcm_value=1000))
+            self.assertIsInstance(spy.received, ProsodyAnalysis)
+            self.assertTrue(spy.received.segments)
 
     def test_prosody_failure_falls_back_to_text_and_duration(self) -> None:
         def fail_prosody(*_: object, **__: object) -> object:
