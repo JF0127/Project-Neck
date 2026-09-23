@@ -1,5 +1,4 @@
-# ==============================
-# Hardware
+
 # ==============================
 network_interface = enp4s0 # type: ignore
 slave_id = 0
@@ -10,9 +9,10 @@ ack_status = 2
 # ==============================
 motor1.passage = 1 # pyright: ignore[reportUndefinedVariable]
 motor1.id = 1
+# Down: -84 deg; top: 41 deg. min/max are numerical bounds.
 motor1.min_position_deg = -84
 motor1.max_position_deg = 41
-motor1.center_position_deg = 7
+motor1.center_position_deg = -7
 motor1.max_velocity_deg_s = 25
 motor1.speed_param = 50
 motor1.current_param = 500
@@ -22,9 +22,11 @@ motor1.current_param = 500
 # ==============================
 motor2.passage = 2
 motor2.id = 2
-motor2.min_position_deg = 107
-motor2.max_position_deg = 234
-motor2.center_position_deg = 145
+# Top: -250 deg; down: -125 deg. min/max are numerical bounds,
+# not the top/down labels. Center -200 is provisional pending calibration.
+motor2.min_position_deg = -250
+motor2.max_position_deg = -125
+motor2.center_position_deg = -200
 motor2.max_velocity_deg_s = 25
 motor2.speed_param = 50
 motor2.current_param = 500
@@ -34,9 +36,10 @@ motor2.current_param = 500
 # ==============================
 motor3.passage = 3
 motor3.id = 3
-motor3.min_position_deg = 57
-motor3.max_position_deg = 238
-motor3.center_position_deg = 147
+# Right: -302 deg; left: -120 deg; middle: -200 deg.
+motor3.min_position_deg = -302
+motor3.max_position_deg = -120
+motor3.center_position_deg = -200
 motor3.max_velocity_deg_s = 30
 motor3.speed_param = 50
 motor3.current_param = 500

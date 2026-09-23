@@ -456,7 +456,7 @@ python -m algorithm.train --config algorithm/configs/baseline.yaml --epochs 50
 | `motion` | `enabled`, `backend: deepseek/baseline`（默认 deepseek），`send_to_motor`（默认 false；false 时只生成 relative artifact且不启动反馈/Socket），DeepSeek 的 `deepseek_model/deepseek_timeout_sec/deepseek_temperature/deepseek_max_output_tokens`，Baseline 的 `model_path/vocab_path/device`，以及 `generated_dir/sync_offset_ms` |
 | `motor` | `feedback_enabled`, `feedback_socket`, `feedback_stale_sec`, `send_enabled`, `socket_path`, `measurement_socket`, `mock` |
 
-`runtime/motor/neck/neck_config.py`（motor 唯一硬件配置）：`network_interface`、`slave_id`、三电机 `passage/id/min/max/center/max_velocity/speed_param/current_param`、RPY 范围、运动学 `c11/c12/c21/c22/k3`、`feedback.enabled/socket_path/rate_hz`。当前电机绝对角度 `[min,center,max]` 分别为 M1 `[-84,7,41]°`、M2 `[107,145,234]°`、M3 `[57,147,238]°`；Pitch 为 `[-45,40]°`，Roll 为 `[-40,40]°`，Yaw 保持 `[-117,58]°`。**不得为了让测试通过而修改标定/限位/电流/速度。**
+`runtime/motor/neck/neck_config.py`（motor 唯一硬件配置）：`network_interface`、`slave_id`、三电机 `passage/id/min/max/center/max_velocity/speed_param/current_param`、RPY 范围、运动学 `c11/c12/c21/c22/k3`、`feedback.enabled/socket_path/rate_hz`。当前电机绝对角度 `[min,center,max]` 分别为 M1 `[-84,-7,41]°`（down=-84、top=41）、M2 `[-250,-200,-125]°`（top=-250、down=-125；center=-200 沿用现有配置，尚待实测确认）、M3 `[-302,-200,-120]°`（right=-302、middle=-200、left=-120）；min/max 为数值上下限，不表示 top/down 或 left/right。Pitch 为 `[-45,40]°`，Roll 为 `[-40,40]°`，Yaw 保持 `[-117,58]°`。**不得为了让测试通过而修改标定/限位/电流/速度。**
 
 ## 9. 硬件与安全铁律
 
