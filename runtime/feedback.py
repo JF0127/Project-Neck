@@ -145,11 +145,25 @@ class MotorFeedbackMonitor:
         self._wait_logged = False
         self._stale_logged = False
         self._last_message_monotonic: float | None = None
+        self._interval_ema_sec: float | None = None
         self._last_valid: bool | None = None
 
     @property
     def connected(self) -> bool:
         return self._connected
+
+    def message_age_sec(self) -> float | None:
+        """Seconds since the last parsed message, or None before the first one."""
+        if self._last_message_monotonic is None:
+            return None
+        return max(0.0, self._clock() - self._last_message_monotonic)
+
+    @property
+    def observed_rate_hz(self) -> float | None:
+        """EMA of the observed NDJSON arrival rate, or None before two messages."""
+        if self._interval_ema_sec is None or self._interval_ema_sec <= 0.0:
+            return None
+        return 1.0 / self._interval_ema_sec
 
     def start(self) -> None:
         """Start the reader and watchdog tasks on the running event loop."""
@@ -198,7 +212,15 @@ class MotorFeedbackMonitor:
             self._log(f"[runtime][feedback] dropped message: {exc}")
             return False
 
-        self._last_message_monotonic = self._clock()
+        arrival = self._clock()
+        if self._last_message_monotonic is not None:
+            interval = arrival - self._last_message_monotonic
+            if 0.0 < interval < 10.0:
+                self._interval_ema_sec = (
+                    interval if self._interval_ema_sec is None
+                    else 0.9 * self._interval_ema_sec + 0.1 * interval
+                )
+        self._last_message_monotonic = arrival
         self._stale_logged = False
         state = self.robot_state
         state.motion_executing = message.motion_executing

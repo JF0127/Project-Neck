@@ -19,8 +19,8 @@ from .tts import SAMPLE_RATE
 
 DOUBAO_TTS_URL = "https://openspeech.bytedance.com/api/v3/tts/unidirectional"
 DOUBAO_RESOURCE_ID = "seed-tts-2.0"
-# Official Seed TTS 2.0 Chinese speaker.
-DEFAULT_DOUBAO_SPEAKER = "zh_female_vv_uranus_bigtts"
+# Official Seed TTS 2.0 Chinese male speaker (Yuan Qi Xiao Shu).
+DEFAULT_DOUBAO_SPEAKER = "zh_male_yuanboxiaoshu_uranus_bigtts"
 COMPLETED_CODE = 20_000_000
 MAX_ATTEMPTS = 3
 

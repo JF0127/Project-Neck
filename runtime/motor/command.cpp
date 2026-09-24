@@ -359,24 +359,7 @@ unsigned motorAngleGet(const std::vector<std::string>& input) {
     return 0;
 }
 
-unsigned neckPoseSet(const std::vector<std::string>& input) {
-    if (input.size() != 5) {
-        std::cout << "Command format error\n"
-                  << "\tShould be \"NeckPoseSet <SlaveId> <Pitch> <Roll> <Yaw>\" (degree)\n";
-        return 1;
-    }
-
-    int slave_id = 0;
-    NeckPose pose{};
-    if (!parseInt(input[1], slave_id) ||
-        !parseDouble(input[2], pose.pitch) ||
-        !parseDouble(input[3], pose.roll) ||
-        !parseDouble(input[4], pose.yaw)) {
-        std::cout << "Parameter error: SlaveId must be an integer and RPY must be numbers\n";
-        return 1;
-    }
-
-    std::string error;
+unsigned applyNeckPoseSet(int slave_id, const NeckPose& pose, std::string& error) {
     if (!validNeckSlave(slave_id, error)) {
         std::cout << "NeckPoseSet error: " << error << "\n";
         return 1;
@@ -391,8 +374,8 @@ unsigned neckPoseSet(const std::vector<std::string>& input) {
     MotorAngles targets{};
     const NeckKinematicsStatus status = inverseKinematics(pose, config, targets);
     if (status != NeckKinematicsStatus::Ok) {
-        std::cout << "NeckPoseSet kinematics error: "
-                  << neckKinematicsStatusString(status) << "\n";
+        error = neckKinematicsStatusString(status);
+        std::cout << "NeckPoseSet kinematics error: " << error << "\n";
         return 1;
     }
 
@@ -421,6 +404,27 @@ unsigned neckPoseSet(const std::vector<std::string>& input) {
         sendToQueue(slave_id, command);
     }
     return 0;
+}
+
+unsigned neckPoseSet(const std::vector<std::string>& input) {
+    if (input.size() != 5) {
+        std::cout << "Command format error\n"
+                  << "\tShould be \"NeckPoseSet <SlaveId> <Pitch> <Roll> <Yaw>\" (degree)\n";
+        return 1;
+    }
+
+    int slave_id = 0;
+    NeckPose pose{};
+    if (!parseInt(input[1], slave_id) ||
+        !parseDouble(input[2], pose.pitch) ||
+        !parseDouble(input[3], pose.roll) ||
+        !parseDouble(input[4], pose.yaw)) {
+        std::cout << "Parameter error: SlaveId must be an integer and RPY must be numbers\n";
+        return 1;
+    }
+
+    std::string error;
+    return applyNeckPoseSet(slave_id, pose, error);
 }
 
 unsigned neckSequence(const std::vector<std::string>& input) {

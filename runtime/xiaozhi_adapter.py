@@ -22,7 +22,8 @@ def is_spoken_robot_text(text: str) -> bool:
 class XiaoZhiAdapter:
     def __init__(self, on_state, on_user_text=None, on_robot_text=None,
                  on_robot_first_audio=None, on_robot_playback_start=None,
-                 on_robot_playback_end=None, on_robot_playback_abort=None):
+                 on_robot_playback_end=None, on_robot_playback_abort=None,
+                 on_robot_audio=None, on_disconnect=None):
         self.on_state = on_state
         self.on_user_text = on_user_text
         self.on_robot_text = on_robot_text
@@ -30,6 +31,8 @@ class XiaoZhiAdapter:
         self.on_robot_playback_start = on_robot_playback_start
         self.on_robot_playback_end = on_robot_playback_end
         self.on_robot_playback_abort = on_robot_playback_abort
+        self.on_robot_audio = on_robot_audio
+        self.on_disconnect = on_disconnect
         self.state = "silent"
         self.active_turn = None
         self.robot_audio_frames = 0
@@ -47,6 +50,8 @@ class XiaoZhiAdapter:
             return
         if kind == "robot_audio":
             self.robot_audio_frames += 1
+            if self.on_robot_audio:
+                self.on_robot_audio(*event[1:])
             return
         if kind != "message" or not isinstance(event[1], dict):
             return
@@ -116,6 +121,8 @@ class XiaoZhiAdapter:
             finally:
                 self._connected = False
                 self.active_turn = None
+                if self.on_disconnect:
+                    self.on_disconnect()
                 self._state("silent")
                 writer.close()
                 await writer.wait_closed()

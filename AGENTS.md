@@ -25,17 +25,25 @@ tools/      项目级分析/可视化工具
 |---|---|
 | Dataset | Clean V2 首帧以最大人物锁定主主持人，后续用人脸 identity 逐帧跟踪；忽略画中画/附加窗口内的其他人物和脸。主主持人首次出现完整脸或脖子不可用时，保留此前有效前缀，删除失败帧及之后全部内容；仅第 0 帧失败等无有效前缀情况才淘汰。输出由模型自动分男女并按主播人脸 embedding 聚类 |
 | Algorithm | Baseline V1（audio+text → 30 fps `rpy_offset`）已实现；训练产物在 `algorithm/outputs/`（gitignored）。部署包 `runtime/models/baseline/{model.pt,vocab.json,config.yaml}`（TorchScript，gitignored） |
-| Runtime | 当前 Ubuntu 主链为 Silero VAD + Qwen3-ASR Streaming + DeepSeek 对话 + Doubao TTS；动作使用 DeepSeek MotionPlan V2。默认 `motion.send_to_motor=false`，只生成 relative trajectory artifact，不启动反馈或连接 Motor；显式开启后才经 MotionProcessor 发送 Motor（见 §3） |
+| Runtime | 当前 Ubuntu 主链为 Silero VAD + Qwen3-ASR Streaming + DeepSeek 对话 + Doubao TTS（当前固定音色 `zh_male_yuanboxiaoshu_uranus_bigtts`）；动作使用 DeepSeek MotionPlan V2。默认 `motion.send_to_motor=false`，只生成 relative trajectory artifact，不启动反馈或连接 Motor；显式开启后才经 MotionProcessor 发送 Motor（见 §3） |
 | Motor | SOEM EtherCAT 主站；三电机；`model` / `measurement` / `feedback` 三个 UDS；速度后处理。反馈需先手动归零（§4.4） |
-| Motion | 默认 `DeepSeekMotionBackend` 消费 robot text、TTS duration、PCM phrase alignment 与可解释 prosody，输出允许空 segments 的高层 `MotionPlan`；Validator 后将同轮 `ProsodyAnalysis`（失败时为 None）传给 Continuous Motion Generator V4：独立三轴慢速 Postural Flow + 高能量 phrase 的局部 Prosodic Accent + `nod/turn/tilt/shake` 语义 modulation，合成为 30 fps relative RPY。Legacy sparse parser/compiler、`BaselineV1Backend` 与部署包均保留。完整 absolute trajectory 在 start continuity 与 neutral return 后统一经过未改默认行为的固定长度 `TrajectoryOptimizer` |
+| Motion | 默认 `DeepSeekMotionBackend` 的 DeepSeek 请求只消费完整 `reply_text`，输出最多三个 `nod/shake` 文本锚点动作（可为空），不传入 TTS duration、PCM alignment 或 prosody；下游独立以文本位置和已知播放时长粗映射旧 `MotionPlan`，传给 Continuous Motion Generator V4（prosody=None）：独立三轴慢速 Postural Flow + `nod/shake` 语义 modulation（无 prosody 时 accent 层为零），合成为 30 fps relative RPY。Legacy sparse parser/compiler、`BaselineV1Backend` 与部署包均保留。完整 absolute trajectory 在 start continuity 与 neutral return 后统一经过未改默认行为的固定长度 `TrajectoryOptimizer` |
 
 仓库当前**没有自动化测试目录**（已按维护成本约定删除）；验证依靠运行命令、`ctest`（motor 保留原有 C++ 测试）和手动真机测试。
 
 ## 3. Runtime 链路
 
+### Ubuntu 本机 V1（独立 opt-in：`python -m runtime --ubuntu-v1`）
+
+本机 `MicrophoneCapture`（PulseAudio `parec` 16 kHz mono s16le）→ 现有 `QwenStreamingRuntime` Silero VAD / Qwen3-ASR Streaming → DeepSeek reply。每轮固定时序：`deepseek_reply` → `motion_generation_start` → DeepSeek `plan_text(reply_text)`（`motion_plan`）→ 现有 `TrajectoryGenerator`/`TrajectoryOptimizer` 生成完整本轮 trajectory（`trajectory_ready`，时长用 `max(1.5, len(reply_text)/5)s` 估计，非精确 TTS 对齐）→ 之后才 `tts_request` 豆包 V3 WebSocket 单向流式 PCM（16 kHz mono s16le）；收到第一块 PCM（`tts_first_audio`）时用同一个触发点同时启动本机 `paplay` 与 `NeckClient.send()`（`playback_and_motion_start`），后续 PCM 边收边播，不走旧完整音频 WebSocket 播放。若 Motion 生成失败则不请求 TTS、不发 Motor（`turn_complete status=motion_failed`）；若 TTS 在首块前失败则不启动 Motion（`turn_complete status=tts_failed`）。Motion 用已生成好的完整 trajectory 独立执行，结束记 `motion_end`；播放与 Motion 都结束后 `turn_complete status=ok`。延迟日志：`trajectory_ready.latency_ms`（deepseek_reply→ready）、`tts_request.latency_ms`（ready→request）、`tts_first_audio.latency_ms`（request→first audio）、`playback_and_motion_start.latency_ms`（first audio→trigger）。不使用 Global Motion、不使用 `neck_pose_set`；Motor 执行沿用 trajectory → `/tmp/neck_model.sock` → `executeTrajectory()`；发送前要求 feedback connected、`head_rpy_valid`、`motor_available`、非 `motion_executing`，否则跳过 Motion 只播音频。麦克风在本轮播放/执行期间暂停，结束后重新采集下一轮。关键日志：`speech_start/speech_end/ASR FINAL`、`deepseek_reply/motion_generation_start/motion_plan/trajectory_ready/tts_request/tts_first_audio/playback_and_motion_start/tts_playback_end/motion_end/turn_complete`。`--motor` 启动后先等待第一条 valid feedback（`[motion-gate] waiting_for_valid_feedback`，每秒重试，含 hint）才打印 ready/listening；Motion 被门控拒绝时打印 `[motion-gate]`，包含 reason（`feedback_disconnected`/`head_rpy_invalid`/`motor_unavailable`/`trajectory_already_executing`）、connected、motor_available、head_rpy_valid、feedback_age_ms、feedback_rate_hz、stale_sec、motion_executing。阈值不调整：Runtime stale 0.2 s、watchdog 0.05 s；Motor 端反馈发布 30 Hz，`NeckFeedbackRead` 要求电机样本 ≤0.1 s；feedback_rate_hz 为 Runtime 实测 EMA 到达率。
+
+纯软件回归：`runtime/.venv/bin/python -m unittest runtime.ubuntu_v1_test -v`（不打开音频/电机；验证 motion_ready 早于 tts_request、首块音频同一触发、Motion 失败不请求 TTS、TTS 失败不启动 Motion、每轮一次 trajectory send）。本机音频验证：`runtime/.venv/bin/python -m runtime --ubuntu-v1`（会打开真实 Mic/扬声器，但不连接 Motor）。真机需用户明确授权、先启动 Motor 并手动执行 `NeckPoseSet 0 0 0 0`、确认反馈 valid 和急停可达，然后再运行 `runtime/.venv/bin/python -m runtime --ubuntu-v1 --motor`；停机先 Ctrl+C 停 Runtime 后停 Motor。不要把 `--motor` 用作软件验证。
+
 ### XiaoZhi + Global Motion V1（独立运行模式）
 
-`python -m runtime --xiaozhi` 在 Ubuntu 直接监听 `0.0.0.0:8766`，接收 ESP32-C3 经 Wi-Fi 主动建立的 BoardBridge TCP 混合流；USB 不参与正式数据链。不能同时启动占用该端口的 `tools/board_bridge_server.py`。两者共用 `runtime/audio/board/xiaozhi-esp32/tools/board_bridge_protocol.py` 的增量解析器；小智固件、Cloud 和 wire protocol 不变。`runtime/xiaozhi_adapter.py` 将首个 user audio/user text、robot text、first audio、playback start/end/abort 映射为 `silent/listening/thinking/speaking`；`robot_audio` 仍解析但不参与动作。以 `% ` 开头的工具文本被标为 non-spoken 并忽略。板卡断线时服务继续等待重连，Global Motion 不停止。
+`python -m runtime --xiaozhi` 在 Ubuntu 直接监听 `0.0.0.0:8766`，接收 ESP32-C3 经 Wi-Fi 主动建立的 BoardBridge TCP 混合流；USB 不参与正式数据链。不能同时启动占用该端口的 `tools/board_bridge_server.py`。两者共用 `runtime/audio/board/xiaozhi-esp32/tools/board_bridge_protocol.py` 的增量解析器；小智固件、Cloud 和 wire protocol 不变。`runtime/xiaozhi_adapter.py` 将首个 user audio/user text、robot text、first audio、playback start/end/abort 映射为 `silent/listening/thinking/speaking`；`robot_audio` 为 Opus 包，仍不参与动作；Ubuntu 旁路按 turn_id 缓存顺序包，收到 `robot_playback_end` 后解码为 16-bit PCM WAV 并写入 `runtime/generated/xiaozhi/turn_XXXX/robot.wav`，同目录 `metadata.json` 保存拼接的 spoken `robot_text`（及分段文本、音频格式）。`robot_playback_abort` 或断线丢弃未落盘轮次；无音频的轮次不写 WAV。已有同名轮次目录不会被覆盖（重启板卡后的重复 turn_id 会记录警告）。录制成功后后台读取本轮 `metadata.json` 的 `robot_text` 与 `robot.wav`：按 WAV 实际采样率和帧数求下游轨迹时长（当前 24 kHz mono PCM s16le；原有输入适配仍重采样 PCM，但 DeepSeek Planner 不使用它）；DeepSeek 只接收文本，后续按文本位置粗映射到时长，复用 Continuous Motion Generator V4 → TrajectoryOptimizer；产物 `deepseek_motion_plan_raw.json`、`motion_plan.json`、`raw_relative_trajectory.json`、`optimized_relative_trajectory.json` 均写在同一 `turn_XXXX/` 下，不再生成 prosody.json。optimized artifact 仍是 30 fps relative RPY，只作旁路记录，不发送 Motor；包括 `--dry-run` 在内均不改变 XiaoZhi 播放或 Global Motion，Motion API/处理失败仅记录警告。使用现有 `motion.deepseek_*` 配置及 `DEEPSEEK_API_KEY`。以 `% ` 开头的工具文本被标为 non-spoken 并忽略。板卡断线时服务继续等待重连，Global Motion 不停止。
+
+板卡麦克风采集诊断（独占 BoardBridge 8766 端口，不能与 `python -m runtime --xiaozhi` 或 `tools/board_bridge_server.py` 同时运行）：`python3 runtime/audio/board/xiaozhi-esp32/tools/record_mic.py --duration 10 --output /tmp/xiaozhi-mic.wav`。ESP32-C3 的 `AudioService::AudioInputTask` 从 codec 读取/重采样为 16 kHz、mono、s16 PCM（10 ms feed），`LiteAudioEngine` 在 listening/voice processing 有效时按 60 ms/960 samples 聚合，`AudioService` 编为 Opus；`Application::MainLoop` 回调 `BoardBridge::EnqueueUserAudio`，现有 Wi-Fi TCP 帧 0x01 将可变长 Opus payload 发给 Ubuntu。新诊断入口复用增量解析器与 libopus 解码器，按收到的 packet 顺序写 16 kHz/mono/PCM s16le WAV；每个完整包解码通常 960 samples / 1920 PCM bytes，Opus payload 大小可变，日志打印实际大小、采样参数和序号缺口。需让板卡保持 listening（例如启用按住说话后按住 BOOT 至少 10 秒）；空闲/播放期间不承诺连续采样，不补造静音；此诊断不启动 ASR、TTS、Motion 或 Motor，也不修改固件和 wire protocol。
 
 `runtime/global_motion.py` 是不调用 LLM 的连续周期 baseline RPY 采样器：三轴共用持续递增的 phase；yaw/pitch/roll 幅度 4.5/2.5/1.2°，相位 0/+50/−70°，各叠加 0.12/0.10/0.10 比例的二次谐波并归一化。基础周期 8 秒，周期时长、幅度和谐波比例每周期只变化 ±6%，跨周期以 quintic smoothstep 平滑参数；状态幅度/速度在 1.5 秒内平滑过渡，不重置 phase。参数集中在 `runtime/config.yaml` 的 `global_motion`。`runtime/xiaozhi_motion_runtime.py` 以 30 fps 持续采样；真机模式按 1 秒绝对轨迹块调用现有 `TrajectoryOptimizer`、`final_trajectory_to_motor_document`、`NeckClient` 和 Motor socket，不经过会追加 neutral return 的旧 `MotionProcessor`。`thinking` 在 Motor 文档的有限状态集合中映射为 `silent`，生成器内部仍保留 thinking 风格。Motor 不支持预排队且没有应用层 ACK，发送器根据反馈 `motion_executing` 等待前一块结束；Motor 结束一块后停止位置帧，姿态反馈可能变 invalid，续块使用已确认执行的上一块终点。块间可能短暂持位。反馈服务断线时暂停 Motor 发送，采样器仍运行；首次发送要求有效姿态且各轴距零不超过 5°，否则等待手动归零。当前没有 DeepSeek Semantic Motion；未来在 baseline `sample()` 后加 semantic offset，再做安全处理。
 
@@ -48,8 +56,8 @@ tools/      项目级分析/可视化工具
                      ┌────────────────────────────────────────────────┤
                      │  robot.wav / metadata.json                     │  PCM
                      ▼                                                ▼
-  PCM phrase alignment → Prosody → DeepSeek MotionPlan V2 → Validator
-                     → Continuous Motion Generator V4 → raw_relative_trajectory.json
+  robot text → DeepSeek 文本关键动作计划（nod/shake、anchor、position、intensity）
+                     → 下游按文本位置/音频时长粗映射 → Continuous Motion Generator V4 → raw_relative_trajectory.json
                      │                                                │
                      ├─ send_to_motor=false: 仅保存 relative artifact ─┤
                      │                                                │
@@ -65,15 +73,15 @@ tools/      项目级分析/可视化工具
     → MotorFeedbackMonitor → RobotState(head_rpy rad, valid, timestamp, motion_executing)
 ```
 
-- 产物目录（每轮覆盖）：`runtime/generated/{robot.wav,prosody.json,deepseek_motion_plan_raw.json,motion_plan.json,raw_relative_trajectory.json,metadata.json}`；开启 Motor 发送时另写 `final_trajectory.json` 与 Motor 文档 `trajectory.json`。relative trajectory 固定 30 fps、radian、`[roll,pitch,yaw]`，不经过 measured RPY 或 MotionProcessor；final artifact 是经过 MotionProcessor/Optimizer 的 absolute RPY。
-- Speech Alignment 在完整 TTS PCM 生成后执行：中文文本保守切为最多 4 个 phrase，优先使用 10 ms PCM RMS 检测到的真实停顿边界，其次使用局部低能量 valley；证据不足时显式标记 `proportional_fallback`。Prosody V1 从 PCM/alignment 提取 segment duration、前后 pause、RMS mean/peak、句内 relative energy、energy peak time、字符语速和离散等级；当前无可靠 F0 依赖，artifact 明确记录该特征未提取。alignment/prosody 不可用时回退原 `text + duration` payload，不伪造音频特征。
-- MotionPlan V2 顶层固定为 `mode/duration_sec/segments`，segment 固定为 `start_sec/end_sec/action/primary_axis/amplitude_deg/reason`；空 segments 表示没有 semantic gesture，但 V4 仍生成慢速 postural flow；有高能量 prosody 时可叠加非语义的 pitch accent。临时 action vocabulary 为 `nod→pitch`、`turn→yaw`、`tilt→roll`、`shake→yaw`。Validator 集中检查 schema、时长、动作—轴兼容、±5° 幅度及 overlap；任一非法 segment 令整份 plan 失败，不再局部接受。
+- 产物目录（每轮覆盖）：`runtime/generated/{robot.wav,deepseek_motion_plan_raw.json,motion_plan.json,raw_relative_trajectory.json,metadata.json}`；开启 Motor 发送时另写 `final_trajectory.json` 与 Motor 文档 `trajectory.json`。relative trajectory 固定 30 fps、radian、`[roll,pitch,yaw]`，不经过 measured RPY 或 MotionProcessor；final artifact 是经过 MotionProcessor/Optimizer 的 absolute RPY。
+- 旧 Speech Alignment / Prosody V1 实现保留用于独立诊断与历史审计，不再作为默认 DeepSeek Motion Planner 输入：中文文本保守切为最多 4 个 phrase，优先使用 10 ms PCM RMS 检测到的真实停顿边界，其次使用局部低能量 valley；证据不足时显式标记 `proportional_fallback`。Prosody V1 从 PCM/alignment 提取 segment duration、前后 pause、RMS mean/peak、句内 relative energy、energy peak time、字符语速和离散等级；当前无可靠 F0 依赖，artifact 明确记录该特征未提取。当前 production 不运行该对齐/韵律分支，也不再向 DeepSeek 传递这些特征。
+- 当前 DeepSeek 文本 Motion Plan 顶层严格为 `reply_text/actions`，`actions` 最多 3 个，每项严格为 `type/anchor/position/intensity`；type 仅 `nod/shake`，position 是 anchor 在完整 reply_text 中从 0 开始的 Unicode 字符下标，intensity 为 `low/medium/high`。空 actions 是正常结果。校验原文一致、锚点子串、顺序/不重叠；模型下标有误而锚点唯一时以原文定位修正，多处同名锚点且下标错误则拒绝。DeepSeek 请求只含 `reply_text`，不输入音频/时长/韵律；无逐帧 RPY 和 Global Motion 输出。旧 `mode/duration_sec/segments` 只在后续轨迹适配器内部由字符位置粗映射形成，动作幅度 low/medium/high=1/2/3.5°，不代表精确 TTS 同步；其余旧语义和审计工具只供历史参考。
 - Continuous Motion Generator V4 三层独立生成（`generate_layers()` 可在软件实验导出完整 radian RPY 层）：Postural Flow 用每轴不同的不均匀间隔、长 pattern、minimum-jerk MOVE + soft HOLD，roll/pitch/yaw 目标幅度分别为 0.9/1.4/1.9°，间隔约 2.4～3.2/2.2～3.0/1.8～2.7 s；majority slow/fast 的语速只将间隔乘 1.06/0.94，不用随机或正弦。Prosodic Accent 仅对 high energy 或 relative_energy>1.15 的 phrase，在 energy_peak_time_sec 附近生成 0.3～0.75° pitch 短时 minimum-jerk excursion，宽度 0.35～0.65 s（受 segment duration 限制）；无可靠 prosody 时该层全零，暂不按 pause 调节 postural hold。Semantic Gesture 仍使用 nod/turn/tilt 单轴 smooth excursion 与 shake 的 `0→+A→-0.8A→0`，归零回到当时 carrier 而非 global zero。第一帧严格 zero，末帧不强制归零；合成逐轴 ±5°，越界依序缩小同向 postural、prosodic、最后 semantic（数值末级 clamp）。旧 `motion_compiler.py` sparse action parser/compiler 保留供 legacy 回归和 V1 audit，不在默认 production path。
 - `TrajectoryOptimizer` 在完整 absolute RPY 上执行对称 `[1,4,6,4,1]/16` smoothing、position-domain 速度投影和迭代加速度投影；固定 30 fps、帧数、首末姿态和 states。默认参数仍为 1 pass、60 deg/s、500 deg/s²、最多 64 轮投影，不做 jerk limit 或语义优化。
 - DeepSeek Motion API、JSON、MotionPlan validation/generation、Motor 或反馈失败均只跳过本轮动作，语音正常播放，不使用默认摇头；`head_rpy_valid == false` 同样只播音频。Baseline A/B 路径仍保留原 fallback。
 - Qwen 主链等待 Audio Client 在实际启动本地播放时回传 `robot_playback_started`，随后发送轨迹；`motion.sync_offset_ms` 仅作为该事件之后的微调（当前为 0）。
 - 轨迹发送前会检查 `RobotState.motion_executing`，避免与正在执行的轨迹冲突。
-- `tools/motion_diversity_audit.py` 保留原 V1 审计与产物；`tools/motion_diversity_audit_v2.py` 对同一固定 16 句各生成一次真实 Doubao TTS，并复用 PCM/alignment/prosody 调用 V2 Planner 各 3 次，结果在 `runtime/experiments/motion_diversity_audit_v2/`。当前 V2 audit 实测 48 次请求中 46 次完整成功，G2 的 run 1/3 因 action overlap 被 Validator 拒绝并保留 raw/error；完整比较见该目录 `report.md`。`tools/continuous_motion_v4.py` 纯软件合成 prosody/plan，导出 V4 三层及 raw/optimized、V3 同 plan 对比的 metrics/7 张曲线至 `runtime/experiments/continuous_motion_v4/`（gitignored；无需网络/硬件）。
+- 历史 `tools/motion_diversity_audit.py`/`tools/motion_diversity_audit_v2.py` 的旧 schema collect 不适用于当前文本 planner；此前 V2 audit 对同一固定 16 句各生成一次真实 Doubao TTS，并复用 PCM/alignment/prosody 调用 V2 Planner 各 3 次，结果在 `runtime/experiments/motion_diversity_audit_v2/`。当前 V2 audit 实测 48 次请求中 46 次完整成功，G2 的 run 1/3 因 action overlap 被 Validator 拒绝并保留 raw/error；完整比较见该目录 `report.md`。`tools/continuous_motion_v4.py` 纯软件合成 prosody/plan，导出 V4 三层及 raw/optimized、V3 同 plan 对比的 metrics/7 张曲线至 `runtime/experiments/continuous_motion_v4/`（gitignored；无需网络/硬件）。
 
 ## 4. 冻结接口
 
@@ -102,6 +110,14 @@ Robot 音频使用同一协议且 `source="robot"`。Client 收完 Robot stream 
 ```
 
 固定 30 fps、`radian`、`[roll,pitch,yaw]`；每帧三个 finite number；`states` 若存在只能是 `speaking/listening/silent` 且与 trajectory 等长。Motor 侧会把速度超限段插帧后执行。
+
+同一 socket 另支持显式 pose 消息（不构造 trajectory、不经过 `executeTrajectory`）：
+
+```json
+{"type":"neck_pose_set","roll_deg":0.5,"pitch_deg":-0.2,"yaw_deg":2.0}
+```
+
+`roll_deg/pitch_deg/yaw_deg` 必填（degree，finite number），`slave_id` 可选（非负整数，默认 0）；顶层不接受其他字段。Motor 解析后直接调用与控制台 `NeckPoseSet` 共用的 `applyNeckPoseSet()`（`validNeckSlave` → 配置加载 → `inverseKinematics` → `set_motor_position` → `sendToQueue`），打印与控制台相同的目标/电机角度报告；无应用层 ACK。
 
 ### 4.3 Motor → Runtime 反馈（只读）
 
@@ -132,7 +148,7 @@ NeckPoseSet 0 0 0 0
 
 | Socket | 方向 | 用途 |
 |---|---|---|
-| `/tmp/neck_model.sock` | Runtime → Motor | 轨迹 JSON |
+| `/tmp/neck_model.sock` | Runtime → Motor | 轨迹 JSON 或 `neck_pose_set` |
 | `/tmp/neck_feedback.sock` | Motor → Runtime | 30 Hz 姿态 NDJSON |
 | `/tmp/neck_measurement.sock` | Runtime → Motor | 配置测量输出（可选，记录执行期实测 RPY） |
 
@@ -304,18 +320,32 @@ source runtime/.venv/bin/activate
 export DEEPSEEK_API_KEY="<your-key>"
 export TAVILY_API_KEY="<your-key>"  # web_search 后端
 export VOLCENGINE_TTS_API_KEY="<your-key>"
-export VOLCENGINE_TTS_SPEAKER="zh_female_vv_uranus_bigtts"  # 可选
+export VOLCENGINE_TTS_SPEAKER="zh_male_yuanboxiaoshu_uranus_bigtts"  # 当前固定男声；可覆盖，其余男声见 §8
 python -m runtime
 
 # MotionPlan V2 数据结构、prosody、validator、Continuous Generator V4、pipeline、legacy compiler 和 Optimizer 纯软件回归
 python -m unittest runtime.qwen_streaming_runtime_test runtime.inference.motion_plan_test runtime.inference.prosody_test runtime.inference.motion_plan_validator_test runtime.inference.trajectory_generator_test runtime.inference.deepseek_motion_test runtime.inference.motion_compiler_test runtime.inference.speech_alignment_test runtime.inference.trajectory_optimizer_test -v
 
+# 稀疏 Global 01 key pose 测试（不生成 30 fps 中间轨迹）：连接已运行的 Motor model socket
+# 先手动启动 master_stack_test、NeckPoseSet 0 0 0 0 归零并确认反馈，然后：
+python3 tools/loop_global_01_neck_pose_set.py [--cycles 3]
+# 纯软件检查（不连接 Motor）：打印每个单帧 payload
+python3 tools/loop_global_01_neck_pose_set.py --dry-run --cycles 1
+
+# 独立生成 3 条周期样条 Global Motion CSV（30 fps、degree、time/roll/pitch/yaw；不接任何设备，V1 不使用）
+python3 tools/generate_global_motion_csv.py  # /tmp/global_01.csv ～ /tmp/global_03.csv
+
+# 独立豆包 V3 WebSocket 流式 PCM → Ubuntu paplay 测试（会立即真实播放；不接主链/电机）
+# 需要 VOLCENGINE_TTS_API_KEY；speaker 沿用 VOLCENGINE_TTS_SPEAKER 或默认值
+runtime/.venv/bin/python tools/test_doubao_streaming_tts.py --save-wav /tmp/project-neck-doubao-stream-test.wav
+
 # V4 三层 + V3 对比的纯软件可视化（使用已安装 matplotlib 的 Dataset 环境，不连接硬件）
 dataset/.venv/bin/python tools/continuous_motion_v4.py
 
-# V1 结果保留；V2 audit：真实 16 次 TTS + 48 次 DeepSeek Motion API，不连接硬件
-python tools/motion_diversity_audit_v2.py --phase collect --reset
-python tools/motion_diversity_audit_v2.py --phase analyze
+# 独立文本语义规划测试：4 条中文回复 → DeepSeek 原始 JSON + 校验后的计划（需 DEEPSEEK_API_KEY；不播放、不连接硬件）
+python tools/test_text_motion_plan.py
+
+# V1/V2 旧音频+prosody audit 属历史脚本，不适用于当前 text-only MotionPlan schema；不要按旧命令重跑 collect。
 
 # Motor：只编译与软件测试（不要启动 executable，除非明确要做真机测试）
 cmake -S runtime/motor -B runtime/motor/build
@@ -460,11 +490,13 @@ python -m algorithm.train --config algorithm/configs/baseline.yaml --epochs 50
 | `vad` | `backend: silero`, `model_path`, `threshold`, `min_speech_ms`, `min_silence_ms` |
 | `asr` | `backend: qwen3_streaming`, 本地 `model_path`, `language: Chinese`, `chunk_size_sec`, `unfixed_chunk_num/unfixed_token_num`, vLLM 的 `gpu_memory_utilization/max_inference_batch_size/max_new_tokens` |
 | `dialogue` | `backend: deepseek`, `model`（当前 `deepseek-flash` / DeepSeek-V4.1-Flash，Responses API streaming，`max_output_tokens=4096`、`reasoning.effort=none`；纯当前日期时间强制使用 `zoneinfo.ZoneInfo("Asia/Shanghai")` 的本地 `get_current_datetime`（UTC+08:00，禁止搜索或由模型自行推算/转换），天气/新闻等实时互联网信息使用本地 `web_search`（含“今天/目前/当前/最近”时自动加入上海绝对日期，每轮最多 3 次），普通静态知识自动跳过工具；默认使用适合语音播放的自然口语，回复尽量控制在 30 个汉字以内（含标点），仅在无法完整回答时才允许略微超过）, `base_url`, `timeout_sec`, `temperature` |
-| `tts` | production 固定 `backend: doubao`（V3 HTTP Chunked、`seed-tts-2.0`、16 kHz mono PCM；speaker 来自 `VOLCENGINE_TTS_SPEAKER`，默认 `zh_female_vv_uranus_bigtts`） |
+| `tts` | production 固定 `backend: doubao`（V3 HTTP Chunked、`seed-tts-2.0`、16 kHz mono PCM。当前固定音色 `zh_male_yuanboxiaoshu_uranus_bigtts`（元气小舒），由 `runtime/doubao_tts.py` 默认值和 `VOLCENGINE_TTS_SPEAKER` 共同确定，同名环境变量可覆盖；同属 seed-tts-2.0 的可用男声另有 `zh_male_shenyeboke_uranus_bigtts`、`zh_male_cixingjieshuonan_uranus_bigtts`、`zh_male_liufei_uranus_bigtts`、`zh_male_wennuanahu_uranus_bigtts`（中年）、`zh_male_dongfanghaoran_uranus_bigtts`、`zh_male_baqiqingshu_uranus_bigtts`（粗犷）、`zh_male_ruyayichen_uranus_bigtts`、`zh_male_qingshuangnanda_uranus_bigtts`（年轻）、`zh_male_shaonianzixin_uranus_bigtts`（少年）；`*_moon_bigtts` 等旧资源音色、以及 `BV012_streaming` 之类旧版音色会因 resource ID 不匹配或未授权被拒绝） |
 | `motion` | `enabled`, `backend: deepseek/baseline`（默认 deepseek），`send_to_motor`（默认 false；false 时只生成 relative artifact且不启动反馈/Socket），DeepSeek 的 `deepseek_model/deepseek_timeout_sec/deepseek_temperature/deepseek_max_output_tokens`，Baseline 的 `model_path/vocab_path/device`，以及 `generated_dir/sync_offset_ms` |
 | `motor` | `feedback_enabled`, `feedback_socket`, `feedback_stale_sec`, `send_enabled`, `socket_path`, `measurement_socket`, `mock` |
 
 `runtime/motor/neck/neck_config.py`（motor 唯一硬件配置）：`network_interface`、`slave_id`、三电机 `passage/id/min/max/center/max_velocity/speed_param/current_param`、RPY 范围、运动学 `c11/c12/c21/c22/k3`、`feedback.enabled/socket_path/rate_hz`。当前电机绝对角度 `[min,center,max]` 分别为 M1 `[-84,-7,41]°`（down=-84、top=41）、M2 `[108,160,234]°`（top=108、down=234、middle=160）、M3 `[57,153,238]°`（right=57、middle=153、left=238）；min/max 为数值上下限，不表示 top/down 或 left/right。Pitch 为 `[-45,40]°`，Roll 为 `[-40,40]°`，Yaw 保持 `[-117,58]°`。**不得为了让测试通过而修改标定/限位/电流/速度。**
+
+独立 `tools/loop_global_01_neck_pose_set.py` 不启动 Motor，也不使用 readline/PTY：假定 `master_stack_test` 已手动运行（已按 §4.4 归零、反馈 valid、急停可达），脚本连接现有 `/tmp/neck_model.sock`，把六个 key pose（格式 `duration_sec, roll_deg, pitch_deg, yaw_deg`）各发送一条 `neck_pose_set` 消息；不构造 trajectory、不生成 30 fps 中间帧，每个 pose 只发送一次。Motor 侧 `applyNeckPoseSet()` 与控制台 `NeckPoseSet` 完全共用同一核心：`validNeckSlave` → 加载配置 → `inverseKinematics` → `set_motor_position` → `sendToQueue` → EtherCAT 发布；控制台 `neckPoseSet` 现在只负责解析参数并调用它。每次发送后等待对应的 2.5/2.5/3/3/2.5/2.5 s 并循环。model socket 没有应用层 ACK；若 Motor 未运行/接口连接失败则明确报错退出。`--cycles N` 限制周期数，默认持续循环；Ctrl+C 后尽力用同一消息发送 neutral `(0,0,0)`（带重试）再退出，发送失败会打印警告并要求人工确认/急停。`--dry-run` 只打印 payload、不连接任何设备。该独立测试不接入 Runtime、XiaoZhi、TTS、DeepSeek 或轨迹生成器。
 
 ## 9. 硬件与安全铁律
 

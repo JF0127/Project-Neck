@@ -14,6 +14,8 @@ from .inference.motor_json import final_trajectory_to_motor_document
 from .inference.trajectory_optimizer import TrajectoryOptimizer, trajectory_metrics
 from .neck_client import NeckClient
 from .xiaozhi_adapter import XiaoZhiAdapter
+from .xiaozhi_recording import RobotTurnRecorder
+from .xiaozhi_motion_pipeline import process_saved_turn
 
 
 class XiaoZhiMotionRuntime:
@@ -38,8 +40,30 @@ class XiaoZhiMotionRuntime:
         self.feedback = MotorFeedbackMonitor(self.motor_state, socket_path=motor.get("feedback_socket", "/tmp/neck_feedback.sock"))
         self.neck = NeckClient(socket_path=motor.get("socket_path", "/tmp/neck_model.sock"))
         self.optimizer = TrajectoryOptimizer()
-        self.adapter = XiaoZhiAdapter(self.set_state)
+        self.robot_recorder = RobotTurnRecorder()
+        self.adapter = XiaoZhiAdapter(
+            self.set_state, on_robot_text=self.robot_recorder.text,
+            on_robot_audio=self.robot_recorder.audio,
+            on_robot_playback_end=self._save_robot_turn,
+            on_robot_playback_abort=lambda turn, _reason, _ts: self.robot_recorder.discard(turn),
+            on_disconnect=self.robot_recorder.disconnect,
+        )
         self._start = None
+
+    def _save_robot_turn(self, turn, timestamp):
+        snapshot = self.robot_recorder.detach(turn)
+        if snapshot is not None:
+            asyncio.create_task(self._process_robot_turn(snapshot, turn, timestamp))
+
+    async def _process_robot_turn(self, snapshot, turn, timestamp):
+        directory = await asyncio.to_thread(snapshot.finish, turn, timestamp)
+        if directory is None:
+            return
+        try:
+            path = await asyncio.to_thread(process_saved_turn, directory, self.config["motion"])
+            print(f"[XIAOZHI] motion artifact: {path}", flush=True)
+        except Exception as exc:
+            print(f"[XIAOZHI] warning: motion skipped turn={turn}: {type(exc).__name__}: {exc}", flush=True)
 
     def _on_cycle(self, index, parameters):
         print(

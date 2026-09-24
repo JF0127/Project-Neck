@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 import socket
 
@@ -47,6 +48,33 @@ class NeckClient:
             f"states={counts}, first={document['trajectory'][0]}, "
             f"last={document['trajectory'][-1]}"
         )
+
+    def send_pose(self, roll_deg: float, pitch_deg: float, yaw_deg: float,
+                  slave_id: int = 0) -> None:
+        """Send one sparse neck pose to the Motor's shared NeckPoseSet core."""
+        document = {
+            "type": "neck_pose_set",
+            "slave_id": int(slave_id),
+            "roll_deg": float(roll_deg),
+            "pitch_deg": float(pitch_deg),
+            "yaw_deg": float(yaw_deg),
+        }
+        if not all(math.isfinite(document[key])
+                   for key in ("roll_deg", "pitch_deg", "yaw_deg")):
+            raise ValueError("neck_pose_set angles must be finite")
+        payload = json.dumps(document, separators=(",", ":"), allow_nan=False).encode("utf-8")
+        self.send_count += 1
+        if self.mock:
+            print(f"[runtime][neck] mock send #{self.send_count}: {len(payload)} JSON bytes (neck_pose_set)")
+            return
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(10.0)
+            client.connect(self.socket_path)
+            client.sendall(payload)
+            client.shutdown(socket.SHUT_WR)
+            while client.recv(4096):
+                pass
+        print(f"[runtime][neck] send #{self.send_count} complete: {self.socket_path} (neck_pose_set)")
 
     def _configure_measurement(
         self,

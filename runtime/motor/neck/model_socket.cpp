@@ -1,5 +1,6 @@
 #include "neck/model_socket.h"
 
+#include "command.h"
 #include "neck/neck_motion.h"
 #include "neck/trajectory_io.h"
 
@@ -219,6 +220,24 @@ void ModelSocketServer::handleClient(int client_fd) {
             return;
         }
         json_text.append(buffer, static_cast<std::size_t>(received));
+    }
+
+    NeckPoseSetRequest pose_request;
+    bool is_pose_set = false;
+    std::string pose_error;
+    if (!parseNeckPoseSetJson(json_text, pose_request, is_pose_set, pose_error)) {
+        std::cerr << "[ModelSocket] rejected neck_pose_set: " << pose_error
+                  << "\n";
+        return;
+    }
+    if (is_pose_set) {
+        std::string error;
+        if (applyNeckPoseSet(pose_request.slave_id, pose_request.pose, error) != 0) {
+            std::cerr << "[ModelSocket] neck_pose_set failed: " << error << "\n";
+            return;
+        }
+        std::cout << "[ModelSocket] neck_pose_set queued\n";
+        return;
     }
 
     Trajectory trajectory;

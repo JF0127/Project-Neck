@@ -29,6 +29,8 @@ def parse_args() -> argparse.Namespace:
         help="print every DeepSeek Responses API event type",
     )
     parser.add_argument("--xiaozhi", action="store_true", help="run XiaoZhi BoardBridge + Global Motion mode")
+    parser.add_argument("--ubuntu-v1", action="store_true", help="run Ubuntu-only local mic/streaming TTS/per-turn trajectory mode")
+    parser.add_argument("--motor", action="store_true", help="explicitly enable Motor for --ubuntu-v1 (requires manual neutral)")
     parser.add_argument("--dry-run", action="store_true", help="sample XiaoZhi Global Motion without Motor")
     parser.add_argument("--duration", type=float, default=None, help="dry-run duration in seconds (default 60)")
     parser.add_argument("--output", type=Path, default=None, help="save dry-run motion CSV")
@@ -53,6 +55,10 @@ def load_config(path: Path) -> tuple[dict[str, Any], Path]:
 def main() -> None:
     args = parse_args()
     try:
+        if args.xiaozhi and args.ubuntu_v1:
+            raise ValueError("--xiaozhi and --ubuntu-v1 are mutually exclusive")
+        if args.motor and not args.ubuntu_v1:
+            raise ValueError("--motor requires --ubuntu-v1")
         if not args.xiaozhi and (args.dry_run or args.duration is not None or args.output is not None):
             raise ValueError("--dry-run, --duration and --output require --xiaozhi")
         config, config_path = load_config(args.config)
@@ -62,6 +68,10 @@ def main() -> None:
                 raise ValueError("--duration requires --dry-run")
             asyncio.run(XiaoZhiMotionRuntime(config, dry_run=args.dry_run).run(
                 duration=args.duration, output=args.output))
+            return
+        if args.ubuntu_v1:
+            from .ubuntu_v1_runtime import UbuntuV1Runtime
+            asyncio.run(UbuntuV1Runtime(config, config_path, send_to_motor=args.motor).run())
             return
         from .qwen_streaming_runtime import (
             build_production_runtime,

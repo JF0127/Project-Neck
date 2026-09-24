@@ -16,8 +16,8 @@ from .motion_plan_validator import (
     MotionPlanValidationError,
     validate_motion_plan,
 )
-from .prosody import ProsodyAnalysis, extract_prosody
-from .speech_alignment import SpeechAlignment, align_speech
+from .text_motion_plan import TextMotionPlan
+from .motion_plan import MotionSegment
 from .trajectory_generator import TrajectoryGenerator
 
 DEFAULT_MODEL = "deepseek-flash"
@@ -35,38 +35,12 @@ _LEGACY_ARTIFACT_FILENAMES = (
     "deepseek_relative_trajectory.json",
 )
 
-MOTION_SYSTEM_PROMPT = """你是仿生机器人颈部 Speaking Motion Planner V2。你只规划高层动作，不生成逐帧轨迹，也不输出具体三轴曲线。
-
-输入说明：
-- robot_text 决定为什么动、是否需要动以及选择什么动作。
-- duration_sec 是完整 TTS 语音时长。
-- segments 给出文本片段的真实语音时间和可解释 prosody。prosody 中的 segment duration、前后停顿、相对能量、能量峰值时间、语速用于判断动作时机和强弱。
-- 文本决定动作语义；prosody 优先帮助决定什么时候动以及动作幅度。不要把动作机械地放在句子中间。
-
-只允许以下临时 engineering action vocabulary：
-- nod：主要由 pitch 表达的单次点头或俯仰 gesture，primary_axis 必须是 pitch。
-- turn：主要由 yaw 表达的单次偏转，primary_axis 必须是 yaw。
-- tilt：主要由 roll 表达的侧倾，primary_axis 必须是 roll。
-- shake：主要由 yaw 表达的一次左右摆动或否定型 gesture，primary_axis 必须是 yaw。
-
-规划原则：
-1. 不需要为了“看起来有动作”而动。普通、弱语义或没有明显韵律事件时，segments 可以是空数组，表示整句 HOLD。
-2. 不要把 pitch 或 nod 当作默认动作。只有当前语义和 prosody 确实支持时才选择 nod。
-3. agreement 或 emphasis 可能适合 nod；question 或 attention shift 可能适合 tilt 或 turn；negation 可能适合 shake；hesitation 或 reflection 可能适合较慢的小幅 turn 或 tilt；普通陈述可能无需显式动作。这些只是语言指导，不是硬编码映射，必须结合当前语义和 prosody 判断。
-4. 动作 timing 优先参考 segment start/end、energy_peak_time_sec、pause_before_sec、pause_after_sec、relative_energy 和 speech_rate_chars_sec，不要固定放在 normalized middle。
-5. amplitude_deg 是高层动作强度，单位 degree，不是最终绝对角度。通常保持约 1 到 4 度，绝对值不得超过 5 度；允许正负方向。
-6. 动作数量由语义事件决定，0 个、1 个、多个都合法。保持稀疏，不为了填满语音而增加动作。
-7. segment 必须在 [0, duration_sec] 内，start_sec < end_sec，按时间顺序排列且不得重叠。
-8. reason 用简短字符串记录选择动作的语义原因。Trajectory Generator 将根据 action 决定具体曲线形状和三轴实现。
-
-输出要求：
-- 只能输出一个合法 JSON object，不得输出 Markdown、代码围栏、解释或其他文字。
-- 顶层必须且只能包含 mode、duration_sec、segments。
-- mode 必须是字符串 speaking。
-- duration_sec 必须原样复制输入的 duration_sec。
-- segments 必须是 JSON array，可以为空。
-- 每个 segment 必须且只能包含 start_sec、end_sec、action、primary_axis、amplitude_deg、reason。
-- action 只能是 nod、turn、tilt、shake，并严格遵守 action 与 primary_axis 的对应关系。
+MOTION_SYSTEM_PROMPT = """你是机器人的语义动作规划器。输入只有 JSON {"reply_text":"完整机器人回复"}。
+只依据文本挑选少量关键语义动作；不推测音频、语速、时长、韵律或播放时间。
+只允许 nod（明确肯定/认同/强调）和 shake（明确否定/拒绝）。普通陈述、礼貌语和没有强语义事件的句子必须返回空 actions；不要每句话强行安排动作。最多 3 个，宁缺毋滥。
+输出且只输出合法 JSON：{"reply_text":"原样复制输入文本","actions":[{"type":"nod 或 shake","anchor":"原文中的连续片段或关键词","position":0,"intensity":"low 或 medium 或 high"}]}。
+position 是 anchor 在 reply_text 中的零基 Unicode 字符起始下标（不是字节下标或时间），必须与原文完全匹配；按位置升序排列，不重叠。actions 可以为空。
+不输出动作时间、角度、逐帧 RPY、Global Motion、解释或 Markdown。
 """
 
 
@@ -90,8 +64,6 @@ class DeepSeekMotionBackend(MotionBackend):
         output_dir: str | Path = "generated",
         client: Any | None = None,
         client_factory: Callable[..., Any] | None = None,
-        aligner: Callable[..., SpeechAlignment] = align_speech,
-        prosody_extractor: Callable[..., ProsodyAnalysis] = extract_prosody,
         trajectory_generator: TrajectoryGenerator | None = None,
     ) -> None:
         if not model.strip():
@@ -106,8 +78,6 @@ class DeepSeekMotionBackend(MotionBackend):
             raise ValueError("DeepSeek Motion max_output_tokens must be positive")
         if client is not None and client_factory is not None:
             raise ValueError("provide either client or client_factory, not both")
-        if not callable(aligner) or not callable(prosody_extractor):
-            raise TypeError("aligner and prosody_extractor must be callable")
 
         self.model = model.strip()
         self.base_url = base_url.rstrip("/")
@@ -122,8 +92,6 @@ class DeepSeekMotionBackend(MotionBackend):
             self.output_dir / RAW_RELATIVE_TRAJECTORY_FILENAME
         )
         self.final_trajectory_path = self.output_dir / FINAL_TRAJECTORY_FILENAME
-        self._aligner = aligner
-        self._prosody_extractor = prosody_extractor
         self._trajectory_generator = trajectory_generator or TrajectoryGenerator()
 
         if client is not None:
@@ -179,26 +147,11 @@ class DeepSeekMotionBackend(MotionBackend):
         return "".join(parts).strip()
 
     @staticmethod
-    def _payload(
-        robot_text: str,
-        duration_sec: float,
-        segments: list[dict[str, Any]] | None,
-    ) -> dict[str, Any]:
-        payload: dict[str, Any] = {
-            "robot_text": robot_text,
-            "duration_sec": duration_sec,
-        }
-        if segments is not None:
-            payload["segments"] = segments
-        return payload
+    def _payload(reply_text: str) -> dict[str, str]:
+        return {"reply_text": reply_text}
 
-    def _request_plan(
-        self,
-        robot_text: str,
-        duration_sec: float,
-        segments: list[dict[str, Any]] | None,
-    ) -> str:
-        payload = self._payload(robot_text, duration_sec, segments)
+    def _request_plan(self, reply_text: str) -> str:
+        payload = self._payload(reply_text)
         user_input = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         try:
             response = self._client.responses.create(
@@ -240,44 +193,36 @@ class DeepSeekMotionBackend(MotionBackend):
         ):
             path.unlink(missing_ok=True)
 
-    def _align_speech(
-        self,
-        robot_text: str,
-        speech: RobotSpeech,
-    ) -> tuple[SpeechAlignment | None, dict[str, Any]]:
-        started = time.perf_counter()
+    def plan_text(self, reply_text: str) -> tuple[str, TextMotionPlan]:
+        """Only DeepSeek call: text in, sparse semantic plan out."""
+        if not isinstance(reply_text, str) or not reply_text.strip():
+            raise DeepSeekMotionError("reply_text is empty")
+        raw = self._request_plan(reply_text)
         try:
-            result = self._aligner(
-                robot_text,
-                speech.pcm_s16le,
-                speech.duration_sec,
-                sample_rate=16_000,
-            )
-            if not isinstance(result, SpeechAlignment):
-                raise TypeError("aligner must return SpeechAlignment")
-            if result.fallback_reason:
-                log(f"[MOTION][ALIGN] fallback: {result.fallback_reason}")
-            log(f"[MOTION][ALIGN] method={result.method}")
-            log(
-                "[MOTION][ALIGN] segments="
-                + json.dumps(
-                    result.segments_as_dicts(),
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                )
-            )
-            log(f"[MOTION][ALIGN] latency={result.latency_sec:.3f}s")
-            return result, result.metadata()
-        except Exception as exc:
-            latency = time.perf_counter() - started
-            reason = f"{type(exc).__name__}: {exc}"
-            log(f"[MOTION][ALIGN] fallback: {reason}")
-            log(f"[MOTION][ALIGN] latency={latency:.3f}s")
-            return None, {
-                "method": "text_duration_fallback",
-                "latency_sec": latency,
-                "fallback_reason": reason,
-            }
+            plan = TextMotionPlan.from_dict(json.loads(raw), reply_text)
+        except (ValueError, TypeError) as exc:
+            raise DeepSeekMotionError(f"invalid text motion plan: {exc}") from exc
+        return raw, plan
+
+    @staticmethod
+    def _for_generator(plan: TextMotionPlan, duration_sec: float) -> MotionPlan:
+        """Coarse positional adapter; NOT a TTS alignment or planner input."""
+        segments = []
+        previous_end = 0.0
+        for action in plan.actions:
+            start = duration_sec * action.position / len(plan.reply_text)
+            start = max(start, previous_end)
+            end = min(duration_sec, start + min(0.5, duration_sec / max(1, len(plan.actions))))
+            if end - start < 1 / 30:
+                continue
+            segments.append(MotionSegment(
+                start, end, action.type,
+                "pitch" if action.type == "nod" else "yaw",
+                {"low": 1.0, "medium": 2.0, "high": 3.5}[action.intensity],
+                f"text anchor: {action.anchor}",
+            ))
+            previous_end = end
+        return MotionPlan("speaking", duration_sec, tuple(segments))
 
     def _write_raw_plan(
         self,
@@ -347,87 +292,26 @@ class DeepSeekMotionBackend(MotionBackend):
         speech = request.current_turn.robot_speech
         if not isinstance(robot_text, str) or not robot_text.strip():
             raise DeepSeekMotionError("motion request has no robot_text")
-        if not isinstance(speech, RobotSpeech):
-            raise DeepSeekMotionError("motion request has no RobotSpeech")
-        duration_sec = float(speech.duration_sec)
-        if not math.isfinite(duration_sec) or duration_sec <= 0.0:
-            raise DeepSeekMotionError("robot speech duration must be positive")
-
+        # Speech duration belongs to the downstream trajectory adapter only.
+        # The DeepSeek request and TextMotionPlan never see speech or its duration.
         self._clear_turn_artifacts()
+        self.prosody_path.unlink(missing_ok=True)
         started = time.perf_counter()
         raw_response: str | None = None
-        alignment, alignment_metadata = self._align_speech(robot_text.strip(), speech)
-        payload_segments: list[dict[str, Any]] | None = None
-        prosody: ProsodyAnalysis | None = None
-        if alignment is not None:
-            try:
-                prosody = self._prosody_extractor(
-                    speech.pcm_s16le,
-                    16_000,
-                    alignment,
-                )
-                payload_segments = prosody.payload_segments()
-                self._write_json(
-                    self.prosody_path,
-                    {
-                        "robot_text": robot_text.strip(),
-                        "alignment": alignment_metadata,
-                        **prosody.to_dict(),
-                    },
-                )
-                log(f"[MOTION][PROSODY] segments={len(prosody.segments)}")
-                log(f"[MOTION][PROSODY] latency={prosody.latency_sec:.3f}s")
-            except Exception as exc:
-                reason = f"{type(exc).__name__}: {exc}"
-                self._write_json(
-                    self.prosody_path,
-                    {
-                        "robot_text": robot_text.strip(),
-                        "duration_sec": duration_sec,
-                        "alignment": alignment_metadata,
-                        "segments": None,
-                        "error": reason,
-                    },
-                )
-                log(f"[MOTION][PROSODY] fallback: {reason}")
-                payload_segments = None
-                prosody = None
-        else:
-            self._write_json(
-                self.prosody_path,
-                {
-                    "robot_text": robot_text.strip(),
-                    "duration_sec": duration_sec,
-                    "alignment": alignment_metadata,
-                    "segments": None,
-                    "error": "speech alignment unavailable",
-                },
-            )
-
-        payload = self._payload(robot_text.strip(), duration_sec, payload_segments)
+        payload = self._payload(robot_text)
         log("[MOTION] request_start")
         try:
-            raw_response = self._request_plan(
-                robot_text.strip(), duration_sec, payload_segments
-            )
+            raw_response, text_plan = self.plan_text(robot_text)
             self._write_raw_plan(payload, raw_response, None)
-            try:
-                document = json.loads(raw_response)
-            except json.JSONDecodeError as exc:
-                raise DeepSeekMotionError(
-                    "DeepSeek Motion output is not valid JSON"
-                ) from exc
-            plan = MotionPlan.from_dict(document)
-            validate_motion_plan(plan, expected_duration_sec=duration_sec)
-            output = self._trajectory_generator.generate(plan, prosody)
-            self._write_json(self.motion_plan_path, plan.to_dict())
-            self._write_raw_relative_trajectory(
-                robot_text.strip(), duration_sec, output
-            )
-            log(
-                "[MOTION] plan_v2: "
-                + json.dumps(plan.to_dict(), ensure_ascii=False, separators=(",", ":"))
-            )
+            self._write_json(self.motion_plan_path, text_plan.to_dict())
+            if not isinstance(speech, RobotSpeech) or not math.isfinite(speech.duration_sec) or speech.duration_sec <= 0:
+                raise DeepSeekMotionError("downstream trajectory requires robot speech duration")
+            duration_sec = float(speech.duration_sec)
+            timed_plan = self._for_generator(text_plan, duration_sec)
+            validate_motion_plan(timed_plan, expected_duration_sec=duration_sec)
+            output = self._trajectory_generator.generate(timed_plan)
+            self._write_raw_relative_trajectory(robot_text, duration_sec, output)
+            log("[MOTION] text_plan: " + json.dumps(text_plan.to_dict(), ensure_ascii=False))
             self._log_range(output)
             return output
         except Exception as exc:

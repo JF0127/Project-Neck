@@ -382,6 +382,68 @@ bool parseState(const std::string& text, BehaviorState& state) {
 
 }  // namespace
 
+bool parseNeckPoseSetJson(const std::string& json_text,
+                          NeckPoseSetRequest& request,
+                          bool& is_pose_set,
+                          std::string& error_message) {
+    error_message.clear();
+    is_pose_set = false;
+
+    JsonValue root;
+    JsonParser parser(json_text);
+    std::string ignored;
+    if (!parser.parse(root, ignored)) {
+        // Not identifiable as a pose message; let trajectory parsing report it.
+        return true;
+    }
+    if (root.type != JsonValue::Type::Object) {
+        return true;
+    }
+    const JsonValue* type = member(root, "type");
+    if (type == nullptr || type->type != JsonValue::Type::String ||
+        type->string != "neck_pose_set") {
+        return true;
+    }
+
+    is_pose_set = true;
+    static const std::map<std::string, bool> supported_fields = {
+        {"type", true}, {"roll_deg", true}, {"pitch_deg", true},
+        {"yaw_deg", true}, {"slave_id", true}
+    };
+    for (const auto& entry : root.object) {
+        if (supported_fields.find(entry.first) == supported_fields.end()) {
+            error_message = "unknown neck_pose_set field '" + entry.first + "'";
+            return false;
+        }
+    }
+
+    const JsonValue* roll = nullptr;
+    const JsonValue* pitch = nullptr;
+    const JsonValue* yaw = nullptr;
+    if (!requireMember(root, "roll_deg", JsonValue::Type::Number, roll, error_message) ||
+        !requireMember(root, "pitch_deg", JsonValue::Type::Number, pitch, error_message) ||
+        !requireMember(root, "yaw_deg", JsonValue::Type::Number, yaw, error_message)) {
+        return false;
+    }
+
+    NeckPoseSetRequest loaded;
+    loaded.pose.roll = roll->number;
+    loaded.pose.pitch = pitch->number;
+    loaded.pose.yaw = yaw->number;
+    const JsonValue* slave = member(root, "slave_id");
+    if (slave != nullptr) {
+        if (slave->type != JsonValue::Type::Number || slave->number < 0.0 ||
+            slave->number != static_cast<double>(static_cast<int>(slave->number))) {
+            error_message = "field 'slave_id' must be a non-negative integer";
+            return false;
+        }
+        loaded.slave_id = static_cast<int>(slave->number);
+    }
+
+    request = loaded;
+    return true;
+}
+
 bool parseTrajectoryJson(const std::string& json_text,
                          Trajectory& trajectory,
                          std::string& error_message) {
