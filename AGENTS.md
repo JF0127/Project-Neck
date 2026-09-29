@@ -39,6 +39,12 @@ tools/      项目级分析/可视化工具
 
 纯软件回归：`runtime/.venv/bin/python -m unittest runtime.ubuntu_v1_test -v`（不打开音频/电机；验证 motion_ready 早于 tts_request、首块音频同一触发、Motion 失败不请求 TTS、TTS 失败不启动 Motion、每轮一次 trajectory send）。本机音频验证：`runtime/.venv/bin/python -m runtime --ubuntu-v1`（会打开真实 Mic/扬声器，但不连接 Motor）。真机需用户明确授权、先启动 Motor 并手动执行 `NeckPoseSet 0 0 0 0`、确认反馈 valid 和急停可达，然后再运行 `runtime/.venv/bin/python -m runtime --ubuntu-v1 --motor`；停机先 Ctrl+C 停 Runtime 后停 Motor。不要把 `--motor` 用作软件验证。
 
+### XiaoZhi 演示版（独立 opt-in：`python -m runtime --xiaozhi-demo`）
+
+板卡自身 Mic → XiaoZhi Cloud ASR/对话/TTS，现有 BoardBridge Wi-Fi TCP 旁路将 robot_text、robot_audio 原始 Opus 包和播放事件交给 Ubuntu。Ubuntu 复用 `XiaoZhiAdapter`/Frozen V2 parser，按 turn 保持 Opus decoder 状态逐包解码，将 PCM 持续写入本机 `paplay --raw`（采样率来自每包 header，当前通常 24 kHz mono）；不等完整 WAV，不使用 Ubuntu 麦克风，不调用本地 Qwen、DeepSeek、豆包或 Motion Planner，也不保存 per-turn 轨迹/录音。用户文本和回复文本由 adapter 打印。板卡本地播放仍保留（演示时可手动断开板卡扬声器）；BoardBridge 是可丢包旁路，Ubuntu 音频可能缺包/延迟，与板卡播放事件不保证精确同步。`robot_playback_end` 后容纳 350 ms 尾包再关闭播放流；abort/断线停止对应本机播放；Ubuntu 播放堵塞时有界 PCM queue 丢弃旁路包，不阻塞板卡主链。
+
+脖子**完全独立于音频和回复**：按 `natural_speaking_01 → 02 → 03 → 01 …` 循环读取 §4.2 的现成 Motor JSON，不生成新轨迹、不运行 Global Motion；默认仅按各 JSON 帧数/30 fps 打印预览和计时，不创建 Motor/feedback client。只有显式 `--motor` 才发送这些现成轨迹：需要配置 `motor.send_enabled=true`/`feedback_enabled=true`，首次反馈有效且姿态距零各轴 ≤1°，并在上一条执行经反馈确认结束后发送下一条；断线/反馈 stale 时等待恢复；发送失败或启动未确认则停止本次脖子循环、音频仍可继续（需人工排查后重启），Motor socket 无应用层 ACK。真机须严格按 §9 先启动 Motor、手动 `NeckPoseSet 0 0 0 0`、确认反馈与急停；未经明确授权绝不执行 `--motor`。**不能**同时启动占用 8766 端口的 `--xiaozhi` 或 `tools/board_bridge_server.py`。纯软件回归（不打开音频/电机）：`runtime/.venv/bin/python -m unittest runtime.xiaozhi_demo_test -v`。软件接板听音：`runtime/.venv/bin/python -m runtime --xiaozhi-demo`（会打开 Ubuntu 扬声器，不连接 Motor）。
+
 ### XiaoZhi + Global Motion V1（独立运行模式）
 
 `python -m runtime --xiaozhi` 在 Ubuntu 直接监听 `0.0.0.0:8766`，接收 ESP32-C3 经 Wi-Fi 主动建立的 BoardBridge TCP 混合流；USB 不参与正式数据链。不能同时启动占用该端口的 `tools/board_bridge_server.py`。两者共用 `runtime/audio/board/xiaozhi-esp32/tools/board_bridge_protocol.py` 的增量解析器；小智固件、Cloud 和 wire protocol 不变。`runtime/xiaozhi_adapter.py` 将首个 user audio/user text、robot text、first audio、playback start/end/abort 映射为 `silent/listening/thinking/speaking`；`robot_audio` 为 Opus 包，仍不参与动作；Ubuntu 旁路按 turn_id 缓存顺序包，收到 `robot_playback_end` 后解码为 16-bit PCM WAV 并写入 `runtime/generated/xiaozhi/turn_XXXX/robot.wav`，同目录 `metadata.json` 保存拼接的 spoken `robot_text`（及分段文本、音频格式）。`robot_playback_abort` 或断线丢弃未落盘轮次；无音频的轮次不写 WAV。已有同名轮次目录不会被覆盖（重启板卡后的重复 turn_id 会记录警告）。录制成功后后台读取本轮 `metadata.json` 的 `robot_text` 与 `robot.wav`：按 WAV 实际采样率和帧数求下游轨迹时长（当前 24 kHz mono PCM s16le；原有输入适配仍重采样 PCM，但 DeepSeek Planner 不使用它）；DeepSeek 只接收文本，后续按文本位置粗映射到时长，复用 Continuous Motion Generator V4 → TrajectoryOptimizer；产物 `deepseek_motion_plan_raw.json`、`motion_plan.json`、`raw_relative_trajectory.json`、`optimized_relative_trajectory.json` 均写在同一 `turn_XXXX/` 下，不再生成 prosody.json。optimized artifact 仍是 30 fps relative RPY，只作旁路记录，不发送 Motor；包括 `--dry-run` 在内均不改变 XiaoZhi 播放或 Global Motion，Motion API/处理失败仅记录警告。使用现有 `motion.deepseek_*` 配置及 `DEEPSEEK_API_KEY`。以 `% ` 开头的工具文本被标为 non-spoken 并忽略。板卡断线时服务继续等待重连，Global Motion 不停止。
@@ -118,6 +124,8 @@ Robot 音频使用同一协议且 `source="robot"`。Client 收完 Robot stream 
 ```
 
 `roll_deg/pitch_deg/yaw_deg` 必填（degree，finite number），`slave_id` 可选（非负整数，默认 0）；顶层不接受其他字段。Motor 解析后直接调用与控制台 `NeckPoseSet` 共用的 `applyNeckPoseSet()`（`validNeckSlave` → 配置加载 → `inverseKinematics` → `set_motor_position` → `sendToQueue`），打印与控制台相同的目标/电机角度报告；无应用层 ACK。
+
+说话自然运动静态文件：`runtime/motor/trajectories/natural_speaking_01.json`（轻点头，241 帧）、`natural_speaking_02.json`（缓慢左右转向，271 帧）、`natural_speaking_03.json`（轻侧倾与点头，301 帧）。末帧时间分别为 8/9/10 s，均为 30 fps、radian、`[roll,pitch,yaw]`、全帧 `speaking`。各轴独立非均匀关键点采用 quintic minimum-jerk 插值，幅度不超过 3.5°，首末为零姿态且解析速度/加速度为零，便于任意顺序衔接；仅生成静态文件，不包含随机调度或自动执行逻辑，未做真机验证。
 
 ### 4.3 Motor → Runtime 反馈（只读）
 
